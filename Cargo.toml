@@ -1,0 +1,23 @@
+[package]
+name = "bit-pop"
+version = "0.1.0"
+edition = "2021"
+description = "Multi-stage genomic read mapper: k-mer inverted index → bit-level alignment → multi-genome ranking"
+license = "MIT"
+authors = ["Mladen Popovic <pop>"]
+
+[dependencies]
+rayon = "1.10"
+clap = { version = "4", features = ["derive"] }
+memmap2 = "0.9"
+zstd = "0.13"
+sha2 = "0.10"
+fastq = "0.3"
+libsais = "0.2"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "benchmark"
+harness = false
