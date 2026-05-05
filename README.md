@@ -5,7 +5,7 @@ A proof-of-concept genomic tool for simultaneous multi-genome DNA read classific
 ## Features
 
 - **Multi-genome indexing**: All reference genomes indexed in a single FM-index structure
-- **Speed via bit-level operations**: 2-bit XOR alignment achieving ~2.3 ns per read operation
+- **Speed via bit-level operations**: 2-bit XOR alignment achieving ~2.3 ns per 31-base XOR chunk operation
 - **Quality-aware refinement**: Smith-Waterman local alignment with Phred-scaled quality penalties
 - **Combined ranking**: Formula balancing alignment score (85%) and k-mer rarity (15%)
 - **Paired-end support**: Full SAM specification compliance with proper FLAG handling
@@ -15,7 +15,7 @@ A proof-of-concept genomic tool for simultaneous multi-genome DNA read classific
 
 1. **FM-index** (radix-sort suffix arrays) for efficient k-mer lookup
 2. **Anchor-based k-mer filtering** (rarest k-mer selection)
-3. **2-bit XOR alignment** (~2.3 ns per read for exact/near-exact matches)
+3. **2-bit XOR alignment** (~2.3 ns per 31-base chunk for exact/near-exact matches)
 4. **Smith-Waterman refinement** for lower confidence scores (<0.9)
 5. **Multi-genome ranking** with combined scoring formula
 
@@ -36,6 +36,38 @@ cargo build --release
 
 ```bash
 pip install biopython
+```
+
+## Quick Start
+
+Build an index from the included genomes and map simulated reads:
+
+```bash
+# 1. Build index (k=10, 4 threads)
+cargo run --release -- build \
+  -f Ecoli_K12_MG1655.fna \
+  -f CP029198.1.fasta \
+  -f Sac_cerevisiae_complete.fasta \
+  -o multi3.bitpop \
+  -k 10 -t 4
+
+# 2. Map single-end reads
+cargo run --release -- map \
+  -i multi3.bitpop \
+  -r simulated_ecoli_10k_new.fastq \
+  -o ecoli_mappings.sam \
+  -a hybrid -t 4
+
+# 3. Map paired-end reads
+cargo run --release -- map \
+  -i multi3.bitpop \
+  --reads-1 SRR1060563_1.fastq \
+  --reads-2 SRR1060563_2.fastq \
+  -o salmonella_paired.sam \
+  -a hybrid -t 4
+
+# 4. View index statistics
+cargo run --release -- stats -i multi3.bitpop
 ```
 
 ## Usage
@@ -76,6 +108,29 @@ pip install biopython
 ```bash
 ./target/release/bit-pop stats -i index.bitpop
 ```
+
+### Add Genomes to Existing Index
+
+```bash
+./target/release/bit-pop load \
+  -i existing.bitpop \
+  -f new_genome.fasta \
+  -o updated.bitpop
+```
+
+### Map Reads Options
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `-i, --index` | Input index path | (required) |
+| `-r, --reads` | Input FASTQ/FASTA file | (required for single-end) |
+| `-1, --reads-1` | R1 FASTQ for paired-end | (required with -2) |
+| `-2, --reads-2` | R2 FASTQ for paired-end | (required with -1) |
+| `-o, --output` | Output SAM file | (required) |
+| `-a, --align-mode` | Alignment mode: xor, sw, hybrid | xor |
+| `-m, --min-score` | Minimum alignment score (0.0-1.0) | 0.7 |
+| `-q, --min-quality` | Minimum Phred quality (0 = no filter) | 0 |
+| `-t, --reads-threads` | Number of threads | 1 |
 
 ### Align Modes
 
@@ -153,7 +208,7 @@ Source code available under the MIT License.
 ## Citation
 
 ```
-Popović, M. (2024). Bit-Pop: A Proof-of-Concept Tool for Multi-Genome DNA Read Classification.
+Popović, M. (2025). Bit-Pop: A Proof-of-Concept Tool for Multi-Genome DNA Read Classification.
 ```
 
 ## License

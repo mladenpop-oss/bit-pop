@@ -11,7 +11,8 @@ description: |
 authors:
   - family-names: Popović
     given-names: Mladen
-    orcid: "https://orcid.org/TODO"
+    email: mladenpop@gmail.com
+    affiliation: Independent Researcher
 repository-code: "https://github.com/mladenpop-oss/bit-pop"
 license: MIT
 license-url: "https://opensource.org/licenses/MIT"
@@ -32,7 +33,7 @@ abstract: |
   We present Bit-Pop, a proof-of-concept genomic tool for simultaneous multi-genome
   DNA read classification. The pipeline combines an FM-index based on radix-sort
   suffix arrays for efficient k-mer lookup across all indexed genomes, a bit-level
-  2-bit XOR alignment achieving approximately 2.3 ns per read operation, and
+  2-bit XOR alignment achieving approximately 2.3 ns per 31-base XOR chunk operation, and
   Smith-Waterman local alignment refinement with Phred-scaled quality-aware scoring.
   Benchmarked on simulated Illumina-like reads across three distantly related genomes
   (Escherichia coli, Staphylococcus aureus, and Saccharomyces cerevisiae), Bit-Pop

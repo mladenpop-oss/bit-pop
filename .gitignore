@@ -27,3 +27,21 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
+
+# LaTeX build artifacts
+*.aux
+*.bbl
+*.blg
+*.log
+*.out
+*.toc
+*.fls
+*.fdb_latexmk
+
+# Benchmark output
+*.sam
+
+# Simulated test data
+simulated_*_2pct.fastq
+simulated_*_5pct.fastq
+simulated_*_10pct.fastq
