@@ -45,3 +45,8 @@ Thumbs.db
 simulated_*_2pct.fastq
 simulated_*_5pct.fastq
 simulated_*_10pct.fastq
+simulated_*.fastq
+SRR*.fastq
+
+# Benchmark output / large data files
+*.bitpop
