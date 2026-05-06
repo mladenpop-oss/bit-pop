@@ -227,8 +227,8 @@ fn serialize_genomes(bp: &BitPop) -> IoResult<Vec<u8>> {
     Ok(data)
 }
 
-/// Serialize BWT in uncompressed 2-bit packed format for direct memmap.
-/// Format: [bwt_len: u64][bwt_packed: bytes, 4 values per byte]
+/// Serialize BWT in uncompressed raw format for direct memmap.
+/// Format: [bwt_len: u64][bwt_bytes: u8 x bwt_len, one 2-bit value per byte]
 fn serialize_bwt_uncompressed(bp: &BitPop) -> IoResult<Vec<u8>> {
     let fm = match bp.get_fm_index() {
         Some(fm) => fm,
@@ -244,16 +244,10 @@ fn serialize_bwt_uncompressed(bp: &BitPop) -> IoResult<Vec<u8>> {
     // Length header
     data.extend_from_slice(&(bwt_len as u64).to_le_bytes());
     
-    // BWT packed: 2 bits per entry, 4 values per byte
-    let bwt_packed_len = (bwt_len + 3) / 4;
-    let mut bwt_packed = vec![0u8; bwt_packed_len];
+    // BWT as raw bytes (one value per byte, values 0-4)
     for i in 0..bwt_len {
-        let v = (fm.bwt_at(i) & 3) as u8;
-        let byte_idx = i / 4;
-        let bit_offset = 6 - (i % 4) * 2;
-        bwt_packed[byte_idx] |= v << bit_offset;
+        data.push(fm.bwt_at(i) as u8);
     }
-    data.extend_from_slice(&bwt_packed);
 
     Ok(data)
 }
@@ -690,25 +684,16 @@ fn load_bwt_from_mmap(mmap: &Mmap, section: &SectionInfo) -> IoResult<Vec<u8>> {
     }
 
     let bwt_len = u64::from_le_bytes(data[0..8].try_into().unwrap()) as usize;
-    let bwt_packed_len = (bwt_len + 3) / 4;
 
-    if 8 + bwt_packed_len > data.len() {
+    if 8 + bwt_len > data.len() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "BWT packed data truncated",
+            "BWT data truncated",
         ));
     }
 
-    let packed = &data[8..8 + bwt_packed_len];
-    let mut bwt = vec![0u8; bwt_len];
-
-    for i in 0..bwt_len {
-        let byte_idx = i / 4;
-        let bit_offset = 6 - (i % 4) * 2;
-        bwt[i] = ((packed[byte_idx] >> bit_offset) & 0x03) as u8;
-    }
-
-    Ok(bwt)
+    let bwt_bytes = &data[8..8 + bwt_len];
+    Ok(bwt_bytes.to_vec())
 }
 
 /// Load SA directly from memmapped v5 format (no decompression).
@@ -1062,14 +1047,14 @@ pub fn load_bitpop_auto(path: &str) -> IoResult<BitPop> {
                 // Peek at the version field to detect format
                 let mut file = std::fs::File::open(path)?;
                 let mut header_buf = [0u8; 14];
-                file.read_exact(&mut header_buf).ok();
-                
-                if &header_buf[0..4] == &MAGIC[..] {
-                    let version = u32::from_le_bytes(header_buf[4..8].try_into().unwrap());
-                    if version == VERSION {
-                        return load_bitpop(path); // new format with memmap2
-                    } else if version == 3 {
-                        return load_legacy_bitpop(path); // legacy format
+                if file.read_exact(&mut header_buf).is_ok() {
+                    if &header_buf[0..4] == &MAGIC[..] {
+                        let version = u32::from_le_bytes(header_buf[4..8].try_into().unwrap());
+                        if version == VERSION {
+                            return load_bitpop(path); // new format with memmap2
+                        } else if version == 3 {
+                            return load_legacy_bitpop(path); // legacy format
+                        }
                     }
                 }
             }

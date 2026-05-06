@@ -84,6 +84,10 @@ struct MapArgs {
     /// Number of threads
     #[arg(short = 't', long, default_value = "1")]
     reads_threads: usize,
+
+    /// Number of top rarest k-mers to try as anchors (default: 1)
+    #[arg(long, default_value = "1")]
+    top_n: usize,
 }
 
 #[derive(clap::Args)]
@@ -188,13 +192,17 @@ fn cmd_map(args: &MapArgs, verbose: bool) {
     println!("Loading index: {}", args.index.to_string_lossy());
     let load_start = Instant::now();
 
-    let bp = match BitPop::deserialize_from_file(args.index.to_str().unwrap()) {
+    let mut bp = match BitPop::deserialize_from_file(args.index.to_str().unwrap()) {
         Ok(bp) => bp,
         Err(e) => {
             eprintln!("Error loading index: {}", e);
             std::process::exit(1);
         }
     };
+
+    if args.top_n > 1 {
+        bp.set_top_n(args.top_n);
+    }
 
     let load_time = load_start.elapsed();
 

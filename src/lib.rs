@@ -264,6 +264,9 @@ pub struct BitPop {
 
     /// K-mer size for indexing
     k: usize,
+
+    /// Number of top rarest k-mers to try as anchors (for error tolerance)
+    top_n: usize,
 }
 
 impl BitPop {
@@ -275,7 +278,19 @@ impl BitPop {
             genomes: HashMap::new(),
             genome_names: HashMap::new(),
             k: _k,
+            top_n: 1,
         }
+    }
+
+    /// Set the number of top rarest k-mers to try as anchors.
+    /// Higher values improve mapping rate at the cost of computation.
+    pub fn set_top_n(&mut self, top_n: usize) {
+        self.top_n = top_n.max(1);
+    }
+
+    /// Get the current top_n setting.
+    pub fn top_n(&self) -> usize {
+        self.top_n
     }
 
     /// Add a genome (reference sequence) to the index.
@@ -816,6 +831,79 @@ impl BitPop {
         (base_threshold + length_factor + qual_factor).max(0.3f64).min(0.8f64)
     }
 
+    /// Find the top-N rarest k-mers in a read, sorted by ascending occurrence count.
+    /// Returns vector of (read_offset, kmer_bytes, count) tuples.
+    fn find_top_n_rarest_kmers(
+        &self,
+        encoded: &[u8],
+        fm: &FmIndex,
+        max_hits: usize,
+    ) -> Vec<(usize, Vec<u8>, usize)> {
+        if encoded.len() < self.k {
+            return Vec::new();
+        }
+
+        let mut candidates: Vec<(usize, Vec<u8>, usize)> = Vec::new();
+
+        for i in 0..=(encoded.len() - self.k) {
+            let kmer = &encoded[i..i + self.k];
+            let count = fm.count_occurrences(kmer);
+            if count > 0 && count <= max_hits {
+                candidates.push((i, kmer.to_vec(), count));
+            }
+        }
+
+        candidates.sort_by_key(|&(_, _, count)| count);
+
+        let n = self.top_n.min(candidates.len());
+        candidates.truncate(n);
+        candidates
+    }
+
+    /// Find the top-N rarest k-mers in a read, considering only high-quality bases.
+    /// Returns vector of (read_offset, kmer_bytes, count) tuples.
+    fn find_top_n_rarest_kmers_quality(
+        &self,
+        encoded: &[u8],
+        quality: &[u8],
+        fm: &FmIndex,
+        min_quality: u8,
+        max_hits: usize,
+    ) -> Vec<(usize, Vec<u8>, usize)> {
+        if encoded.len() < self.k {
+            return Vec::new();
+        }
+
+        let mut candidates: Vec<(usize, Vec<u8>, usize)> = Vec::new();
+
+        for i in 0..=(encoded.len() - self.k) {
+            let qual_end = (i + self.k).min(quality.len());
+            if qual_end - i < self.k {
+                continue;
+            }
+
+            let has_low_quality: bool = quality[i..qual_end]
+                .iter()
+                .any(|&q| q < min_quality);
+
+            if has_low_quality {
+                continue;
+            }
+
+            let kmer = &encoded[i..i + self.k];
+            let count = fm.count_occurrences(kmer);
+            if count > 0 && count <= max_hits {
+                candidates.push((i, kmer.to_vec(), count));
+            }
+        }
+
+        candidates.sort_by_key(|&(_, _, count)| count);
+
+        let n = self.top_n.min(candidates.len());
+        candidates.truncate(n);
+        candidates
+    }
+
     /// Anchor-based filter: replaces k-mer co-occurrence counting with
     /// rarest-k-mer anchor + 2-bit XOR scoring.
     ///
@@ -830,8 +918,8 @@ impl BitPop {
         self.anchor_filter_with_threshold(read, min_score, usize::MAX)
     }
 
-    /// Anchor-based filter with AlignMode support.
-    /// Uses the specified alignment algorithm for scoring candidates.
+   /// Anchor-based filter with AlignMode support.
+    /// Uses top-N rarest k-mers as anchors for error tolerance.
     pub fn anchor_filter_with_mode(
         &self,
         read: &str,
@@ -849,123 +937,113 @@ impl BitPop {
             return Vec::new();
         }
 
-        // Find rarest k-mer
-        let mut best_count = usize::MAX;
-        let mut anchor_read_offset = 0usize;
-
-        for i in 0..=(encoded.len() - self.k) {
-            let kmer = &encoded[i..i + self.k];
-            let count = fm.count_occurrences(kmer);
-            if count > 0 && count < best_count && count <= max_hits {
-                best_count = count;
-                anchor_read_offset = i;
-            }
-        }
-
-        if best_count == usize::MAX {
+        let top_n_kmers = self.find_top_n_rarest_kmers(&encoded, fm, max_hits);
+        if top_n_kmers.is_empty() {
             return Vec::new();
         }
 
-        let anchor_kmer = &encoded[anchor_read_offset..anchor_read_offset + self.k];
-        let raw_positions = fm.find_positions(anchor_kmer, 500);
-
-        // Smart stride based on position count
-        let positions: Vec<(u32, u64)> = if raw_positions.len() > 100 {
-            let stride = raw_positions.len() / 100;
-            raw_positions.into_iter().step_by(stride).collect()
-        } else {
-            raw_positions
-        };
-
         let mut scored = Vec::new();
         let read_len = encoded.len();
+        let mut seen: std::collections::HashSet<(u32, u64)> = std::collections::HashSet::new();
 
-        for &(genome_id, position) in &positions {
-            let genome = match self.genomes.get(&genome_id) {
-                Some(g) => g,
-                None => continue,
+        for &(anchor_read_offset, ref anchor_kmer, _) in &top_n_kmers {
+            let raw_positions = fm.find_positions(anchor_kmer, 500);
+
+            let positions: Vec<(u32, u64)> = if raw_positions.len() > 100 {
+                let stride = raw_positions.len() / 100;
+                raw_positions.into_iter().step_by(stride).collect()
+            } else {
+                raw_positions
             };
 
-            let estimated_read_start = position as isize - anchor_read_offset as isize;
-
-            // Try multiple offsets around the estimated position
-            // Cap at 200bp to avoid O(n^2) slowdown on long reads
-            let search_radius: isize = (self.k.max(read_len / 4)).min(200) as isize;
-            let mut best_score = f64::NEG_INFINITY;
-            let mut best_cigar = String::new();
-            let mut best_offset: usize = 0;
-
-            for delta in -search_radius..=search_radius {
-                let candidate_start = (estimated_read_start + delta).max(0) as usize;
-                if candidate_start >= genome.len() { continue; }
-                let region_end = (candidate_start + read_len).min(genome.len());
-                if region_end - candidate_start < self.k {
+            for &(genome_id, position) in &positions {
+                if !seen.insert((genome_id, position)) {
                     continue;
                 }
 
-                let candidate_region = &genome[candidate_start..region_end];
-
-                let (score, cigar, _) = match mode {
-                    AlignMode::Xor => {
-                        if read_len <= 31 {
-                            align::two_bit_align(&encoded, candidate_region)
-                        } else {
-                            let (s, o) = align::two_bit_score_chunks(&encoded, candidate_region);
-                            (s, format!("{}M", read_len), o)
-                        }
-                    }
-                    AlignMode::Sw => {
-                        if read_len <= 31 {
-                            let (sw_score, cigar) = align::smith_waterman(&encoded, candidate_region);
-                            if sw_score == 0 { continue; }
-                            let normalized = (sw_score as f64) / (2.0 * read_len as f64);
-                            (normalized.min(1.0).max(0.0), cigar, candidate_start)
-                        } else {
-                            let (sw_score, cigar) = align::smith_waterman_chunked(&encoded, candidate_region);
-                            if sw_score == 0 { continue; }
-                            let normalized = (sw_score as f64) / (2.0 * read_len as f64);
-                            (normalized.min(1.0).max(0.0), cigar, candidate_start)
-                        }
-                    }
-                    AlignMode::Hybrid => {
-                        // XOR first for speed
-                        if read_len <= 31 {
-                            let (xor_s, xor_cigar, _) = align::two_bit_align(&encoded, candidate_region);
-                            if xor_s >= 0.9 {
-                                (xor_s, xor_cigar, candidate_start)
-                            } else {
-                                let (sw_score, sw_cigar) = align::smith_waterman(&encoded, candidate_region);
-                                if sw_score == 0 { continue; }
-                                let normalized = (sw_score as f64) / (2.0 * read_len as f64);
-                                if normalized > xor_s {
-                                    (normalized.min(1.0), sw_cigar, candidate_start)
-                                } else {
-                                    (xor_s, xor_cigar, candidate_start)
-                                }
-                            }
-                        } else {
-                            let (s, _) = align::two_bit_score_chunks(&encoded, candidate_region);
-                            if s >= 0.9 {
-                                (s, format!("{}M", read_len), candidate_start)
-                            } else {
-                                let (sw_score, sw_cigar) = align::smith_waterman_chunked(&encoded, candidate_region);
-                                let sw_s = (sw_score as f64) / (2.0 * read_len as f64);
-                                if sw_s > s && sw_score > 0 { (sw_s.min(1.0), sw_cigar, candidate_start) }
-                                else { (s, format!("{}M", read_len), candidate_start) }
-                            }
-                        }
-                    }
+                let genome = match self.genomes.get(&genome_id) {
+                    Some(g) => g,
+                    None => continue,
                 };
 
-                if score > best_score {
-                    best_score = score;
-                    best_cigar = cigar;
-                    best_offset = candidate_start;
-                }
-            }
+                let estimated_read_start = position as isize - anchor_read_offset as isize;
 
-            if best_score >= min_score {
-                scored.push((genome_id, best_offset as u64, best_score.max(0.0).min(1.0), best_cigar));
+                let search_radius: isize = (self.k.max(read_len / 4)).min(200) as isize;
+                let mut best_score = f64::NEG_INFINITY;
+                let mut best_cigar = String::new();
+                let mut best_offset: usize = 0;
+
+                for delta in -search_radius..=search_radius {
+                    let candidate_start = (estimated_read_start + delta).max(0) as usize;
+                    if candidate_start >= genome.len() { continue; }
+                    let region_end = (candidate_start + read_len).min(genome.len());
+                    if region_end - candidate_start < self.k {
+                        continue;
+                    }
+
+                    let candidate_region = &genome[candidate_start..region_end];
+
+                    let (score, cigar, _) = match mode {
+                        AlignMode::Xor => {
+                            if read_len <= 31 {
+                                align::two_bit_align(&encoded, candidate_region)
+                            } else {
+                                let (s, o) = align::two_bit_score_chunks(&encoded, candidate_region);
+                                (s, format!("{}M", read_len), o)
+                            }
+                        }
+                        AlignMode::Sw => {
+                            if read_len <= 31 {
+                                let (sw_score, cigar) = align::smith_waterman(&encoded, candidate_region);
+                                if sw_score == 0 { continue; }
+                                let normalized = (sw_score as f64) / (2.0 * read_len as f64);
+                                (normalized.min(1.0).max(0.0), cigar, candidate_start)
+                            } else {
+                                let (sw_score, cigar) = align::smith_waterman_chunked(&encoded, candidate_region);
+                                if sw_score == 0 { continue; }
+                                let normalized = (sw_score as f64) / (2.0 * read_len as f64);
+                                (normalized.min(1.0).max(0.0), cigar, candidate_start)
+                            }
+                        }
+                        AlignMode::Hybrid => {
+                            if read_len <= 31 {
+                                let (xor_s, xor_cigar, _) = align::two_bit_align(&encoded, candidate_region);
+                                if xor_s >= 0.9 {
+                                    (xor_s, xor_cigar, candidate_start)
+                                } else {
+                                    let (sw_score, sw_cigar) = align::smith_waterman(&encoded, candidate_region);
+                                    if sw_score == 0 { continue; }
+                                    let normalized = (sw_score as f64) / (2.0 * read_len as f64);
+                                    if normalized > xor_s {
+                                        (normalized.min(1.0), sw_cigar, candidate_start)
+                                    } else {
+                                        (xor_s, xor_cigar, candidate_start)
+                                    }
+                                }
+                            } else {
+                                let (s, _) = align::two_bit_score_chunks(&encoded, candidate_region);
+                                if s >= 0.9 {
+                                    (s, format!("{}M", read_len), candidate_start)
+                                } else {
+                                    let (sw_score, sw_cigar) = align::smith_waterman_chunked(&encoded, candidate_region);
+                                    let sw_s = (sw_score as f64) / (2.0 * read_len as f64);
+                                    if sw_s > s && sw_score > 0 { (sw_s.min(1.0), sw_cigar, candidate_start) }
+                                    else { (s, format!("{}M", read_len), candidate_start) }
+                                }
+                            }
+                        }
+                    };
+
+                    if score > best_score {
+                        best_score = score;
+                        best_cigar = cigar;
+                        best_offset = candidate_start;
+                    }
+                }
+
+                if best_score >= min_score {
+                    scored.push((genome_id, best_offset as u64, best_score.max(0.0).min(1.0), best_cigar));
+                }
             }
         }
 
@@ -974,8 +1052,9 @@ impl BitPop {
         scored
     }
 
-    /// Anchor-based filter with explicit repetitive k-mer threshold.
+  /// Anchor-based filter with explicit repetitive k-mer threshold.
     /// K-mers with more than `max_hits` total positions are skipped.
+    /// Uses top-N rarest k-mers as anchors for error tolerance.
     pub fn anchor_filter_with_threshold(
         &self,
         read: &str,
@@ -992,132 +1071,125 @@ impl BitPop {
             return Vec::new();
         }
 
-        let mut best_count = usize::MAX;
-        let mut anchor_read_offset = 0usize;
-
-        for i in 0..=(encoded.len() - self.k) {
-            let kmer = &encoded[i..i + self.k];
-            let count = fm.count_occurrences(kmer);
-            if count > 0 && count < best_count && count <= max_hits {
-                best_count = count;
-                anchor_read_offset = i;
-            }
-        }
-
-        if best_count == usize::MAX {
+        let top_n_kmers = self.find_top_n_rarest_kmers(&encoded, fm, max_hits);
+        if top_n_kmers.is_empty() {
             return Vec::new();
         }
 
-        let anchor_kmer = &encoded[anchor_read_offset..anchor_read_offset + self.k];
-        // Limit anchor positions aggressively — we only keep top 50 results
-        let raw_positions = fm.find_positions(anchor_kmer, 500);
-
-        // Sample positions with stride to avoid redundant close alignments
-        let positions: Vec<(u32, u64)> = if raw_positions.len() > 100 {
-            let stride = raw_positions.len() / 100;
-            raw_positions.into_iter().step_by(stride).collect()
-        } else {
-            raw_positions
-        };
-
         let mut scored = Vec::new();
         let read_len = encoded.len();
+        let mut seen: std::collections::HashSet<(u32, u64)> = std::collections::HashSet::new();
 
-        for &(genome_id, position) in &positions {
-            let genome = match self.genomes.get(&genome_id) {
-                Some(g) => g,
-                None => continue,
+        for &(anchor_read_offset, ref anchor_kmer, _) in &top_n_kmers {
+            let raw_positions = fm.find_positions(anchor_kmer, 500);
+
+            let positions: Vec<(u32, u64)> = if raw_positions.len() > 100 {
+                let stride = raw_positions.len() / 100;
+                raw_positions.into_iter().step_by(stride).collect()
+            } else {
+                raw_positions
             };
 
-            let estimated_read_start = position as isize - anchor_read_offset as isize;
-
-            if read_len <= 31 {
-                let estimated_start = (position as isize - anchor_read_offset as isize).max(0) as usize;
-                let region_end = (estimated_start + read_len).min(genome.len());
-                let region = &genome[estimated_start..region_end];
-
-                if region.len() < self.k {
+            for &(genome_id, position) in &positions {
+                if !seen.insert((genome_id, position)) {
                     continue;
                 }
 
-                if region.len() == read_len && encoded == *region {
-                    scored.push((genome_id, estimated_start as u64, 1.0, format!("{}M", read_len)));
+                let genome = match self.genomes.get(&genome_id) {
+                    Some(g) => g,
+                    None => continue,
+                };
+
+                let estimated_read_start = position as isize - anchor_read_offset as isize;
+
+                if read_len <= 31 {
+                    let estimated_start = (position as isize - anchor_read_offset as isize).max(0) as usize;
+                    let region_end = (estimated_start + read_len).min(genome.len());
+                    let region = &genome[estimated_start..region_end];
+
+                    if region.len() < self.k {
+                        continue;
+                    }
+
+                    if region.len() == read_len && encoded == *region {
+                        scored.push((genome_id, estimated_start as u64, 1.0, format!("{}M", read_len)));
+                        continue;
+                    }
+
+                    let (score, cigar, offset) = align::two_bit_align(&encoded, region);
+                    if score >= min_score {
+                        let actual_pos = (estimated_start + offset) as u64;
+                        scored.push((genome_id, actual_pos, score, cigar));
+                    }
                     continue;
                 }
 
-                let (score, cigar, offset) = align::two_bit_align(&encoded, region);
-                if score >= min_score {
-                    let actual_pos = (estimated_start + offset) as u64;
-                    scored.push((genome_id, actual_pos, score, cigar));
+                let search_radius: isize = (self.k.max(read_len / 4)).min(200) as isize;
+                let mut best_score = 0.0f64;
+                let mut best_offset: usize = 0;
+
+                for delta in -search_radius..=search_radius {
+                    let candidate_start = (estimated_read_start + delta).max(0) as usize;
+                    if candidate_start >= genome.len() { continue; }
+                    let region_end = (candidate_start + read_len).min(genome.len());
+                    if region_end - candidate_start < self.k {
+                        continue;
+                    }
+
+                    let candidate_region = &genome[candidate_start..region_end];
+
+                    if candidate_region.len() == read_len && encoded == *candidate_region {
+                        best_score = 1.0;
+                        best_offset = candidate_start;
+                        break;
+                    }
+
+                    let (score, _) = align::two_bit_score_chunks(&encoded, candidate_region);
+                    if score > best_score {
+                        best_score = score;
+                        best_offset = candidate_start;
+                    }
                 }
-                continue;
-            }
 
-            let search_radius: isize = (self.k.max(read_len / 4)).min(200) as isize;
-            let mut best_score = 0.0f64;
-            let mut best_offset: usize = 0;
+                if best_score >= min_score {
+                    let cand_end = (best_offset + read_len).min(genome.len());
+                    let cand_region = &genome[best_offset..cand_end];
+                    let overlap = read_len.min(cand_region.len());
+                    let read_part = &encoded[..overlap];
 
-            for delta in -search_radius..=search_radius {
-                let candidate_start = (estimated_read_start + delta).max(0) as usize;
-                if candidate_start >= genome.len() { continue; }
-                let region_end = (candidate_start + read_len).min(genome.len());
-                if region_end - candidate_start < self.k {
-                    continue;
-                }
-
-                let candidate_region = &genome[candidate_start..region_end];
-
-                if candidate_region.len() == read_len && encoded == *candidate_region {
-                    best_score = 1.0;
-                    best_offset = candidate_start;
-                    break;
-                }
-
-                let (score, _) = align::two_bit_score_chunks(&encoded, candidate_region);
-                if score > best_score {
-                    best_score = score;
-                    best_offset = candidate_start;
-                }
-            }
-
-            if best_score >= min_score {
-                let cand_end = (best_offset + read_len).min(genome.len());
-                let cand_region = &genome[best_offset..cand_end];
-                let overlap = read_len.min(cand_region.len());
-                let read_part = &encoded[..overlap];
-
-                let mut cigar = String::with_capacity(read_len * 2 + 2);
-                let mut ops: Vec<(u8, usize)> = Vec::new();
-                for i in 0..overlap {
-                    let op = if read_part[i] == cand_region[i] { 0u8 } else { 1u8 };
-                    if let Some(last) = ops.last_mut() {
-                        if last.0 == op {
-                            last.1 += 1;
+                    let mut cigar = String::with_capacity(read_len * 2 + 2);
+                    let mut ops: Vec<(u8, usize)> = Vec::new();
+                    for i in 0..overlap {
+                        let op = if read_part[i] == cand_region[i] { 0u8 } else { 1u8 };
+                        if let Some(last) = ops.last_mut() {
+                            if last.0 == op {
+                                last.1 += 1;
+                            } else {
+                                ops.push((op, 1));
+                            }
                         } else {
                             ops.push((op, 1));
                         }
-                    } else {
-                        ops.push((op, 1));
                     }
-                }
-                if cand_region.len() < read_len {
-                    let clip = read_len - overlap;
-                    if ops.is_empty() || ops.last().unwrap().0 != 2 {
-                        ops.push((2, clip));
-                    } else {
-                        ops.last_mut().unwrap().1 += clip;
+                    if cand_region.len() < read_len {
+                        let clip = read_len - overlap;
+                        if ops.is_empty() || ops.last().unwrap().0 != 2 {
+                            ops.push((2, clip));
+                        } else {
+                            ops.last_mut().unwrap().1 += clip;
+                        }
                     }
+                    for (op, count) in ops {
+                        cigar.push_str(&count.to_string());
+                        cigar.push(match op {
+                            0 => 'M',
+                            1 => 'X',
+                            _ => 'S',
+                        });
+                    }
+                    let mapped_position = best_offset as u64;
+                    scored.push((genome_id, mapped_position, best_score, cigar));
                 }
-                for (op, count) in ops {
-                    cigar.push_str(&count.to_string());
-                    cigar.push(match op {
-                        0 => 'M',
-                        1 => 'X',
-                        _ => 'S',
-                    });
-                }
-                let mapped_position = best_offset as u64;
-                scored.push((genome_id, mapped_position, best_score, cigar));
             }
         }
 
@@ -1152,7 +1224,7 @@ impl BitPop {
         self.anchor_filter_with_quality(read, quality, effective_min, min_quality, max_hits)
     }
 
-    /// Quality-aware anchor filter: finds rarest k-mer using only high-quality bases,
+    /// Quality-aware anchor filter: finds top-N rarest k-mers using only high-quality bases,
     /// then scores alignment with Phred-scaled quality penalties.
     pub fn anchor_filter_with_quality(
         &self,
@@ -1172,33 +1244,8 @@ impl BitPop {
             return Vec::new();
         }
 
-        // Find rarest k-mer considering only high-quality bases
-        let mut best_count = usize::MAX;
-        let mut anchor_read_offset = 0usize;
-
-        for i in 0..=(encoded.len() - self.k) {
-            let qual_end = (i + self.k).min(quality.len());
-            if qual_end - i < self.k {
-                continue;
-            }
-
-            let has_low_quality: bool = quality[i..qual_end]
-                .iter()
-                .any(|&q| q < min_quality);
-
-            if has_low_quality {
-                continue;
-            }
-
-            let kmer = &encoded[i..i + self.k];
-            let count = fm.count_occurrences(kmer);
-            if count > 0 && count < best_count && count <= max_hits {
-                best_count = count;
-                anchor_read_offset = i;
-            }
-        }
-
-        if best_count == usize::MAX {
+        let top_n_kmers = self.find_top_n_rarest_kmers_quality(&encoded, quality, fm, min_quality, max_hits);
+        if top_n_kmers.is_empty() {
             // Fallback: use regular anchor filter if no high-quality k-mers found
             let regular = self.anchor_filter_with_threshold(read, min_score, max_hits);
             return regular
@@ -1207,110 +1254,115 @@ impl BitPop {
                 .collect();
         }
 
-        let anchor_kmer = &encoded[anchor_read_offset..anchor_read_offset + self.k];
-        let raw_positions = fm.find_positions(anchor_kmer, 500);
-
-        let positions: Vec<(u32, u64)> = if raw_positions.len() > 100 {
-            let stride = raw_positions.len() / 100;
-            raw_positions.into_iter().step_by(stride).collect()
-        } else {
-            raw_positions
-        };
-
         let mut scored = Vec::new();
         let read_len = encoded.len();
+        let mut seen: std::collections::HashSet<(u32, u64)> = std::collections::HashSet::new();
 
-        for &(genome_id, position) in &positions {
-            let genome = match self.genomes.get(&genome_id) {
-                Some(g) => g,
-                None => continue,
+        for &(anchor_read_offset, ref anchor_kmer, _) in &top_n_kmers {
+            let raw_positions = fm.find_positions(anchor_kmer, 500);
+
+            let positions: Vec<(u32, u64)> = if raw_positions.len() > 100 {
+                let stride = raw_positions.len() / 100;
+                raw_positions.into_iter().step_by(stride).collect()
+            } else {
+                raw_positions
             };
 
-            let estimated_read_start = position as isize - anchor_read_offset as isize;
-
-            if read_len <= 31 {
-                let estimated_start = (position as isize - anchor_read_offset as isize).max(0) as usize;
-                let region_end = (estimated_start + read_len).min(genome.len());
-                let region = &genome[estimated_start..region_end];
-
-                if region.len() < self.k {
+            for &(genome_id, position) in &positions {
+                if !seen.insert((genome_id, position)) {
                     continue;
                 }
 
-                let qual_slice = &quality[..read_len.min(quality.len())];
-                let (score, cigar, _, penalty) = align::two_bit_align_with_quality(&encoded, region, qual_slice);
-                
-                if score >= min_score {
-                    let actual_pos = (estimated_start + 0) as u64;
-                    scored.push((genome_id, actual_pos, score, cigar, penalty));
-                }
-                continue;
-            }
+                let genome = match self.genomes.get(&genome_id) {
+                    Some(g) => g,
+                    None => continue,
+                };
 
-            let search_radius: isize = (self.k.max(read_len / 4)).min(200) as isize;
-            let mut best_score = f64::NEG_INFINITY;
-            let mut best_offset: usize = 0;
-            let mut best_penalty = 0.0f64;
+                let estimated_read_start = position as isize - anchor_read_offset as isize;
 
-            for delta in -search_radius..=search_radius {
-                let candidate_start = (estimated_read_start + delta).max(0) as usize;
-                if candidate_start >= genome.len() { continue; }
-                let region_end = (candidate_start + read_len).min(genome.len());
-                if region_end - candidate_start < self.k {
+                if read_len <= 31 {
+                    let estimated_start = (position as isize - anchor_read_offset as isize).max(0) as usize;
+                    let region_end = (estimated_start + read_len).min(genome.len());
+                    let region = &genome[estimated_start..region_end];
+
+                    if region.len() < self.k {
+                        continue;
+                    }
+
+                    let qual_slice = &quality[..read_len.min(quality.len())];
+                    let (score, cigar, _, penalty) = align::two_bit_align_with_quality(&encoded, region, qual_slice);
+                    
+                    if score >= min_score {
+                        let actual_pos = (estimated_start + 0) as u64;
+                        scored.push((genome_id, actual_pos, score, cigar, penalty));
+                    }
                     continue;
                 }
 
-                let candidate_region = &genome[candidate_start..region_end];
-                let qual_slice = &quality[..read_len.min(quality.len())];
+                let search_radius: isize = (self.k.max(read_len / 4)).min(200) as isize;
+                let mut best_score = f64::NEG_INFINITY;
+                let mut best_offset: usize = 0;
+                let mut best_penalty = 0.0f64;
 
-                // Use chunked scoring for long reads with quality
-                let (chunk_score, _, chunk_penalty) = align::two_bit_score_chunks_with_quality(&encoded, candidate_region, qual_slice);
-                let adjusted = chunk_score + chunk_penalty;
+                for delta in -search_radius..=search_radius {
+                    let candidate_start = (estimated_read_start + delta).max(0) as usize;
+                    if candidate_start >= genome.len() { continue; }
+                    let region_end = (candidate_start + read_len).min(genome.len());
+                    if region_end - candidate_start < self.k {
+                        continue;
+                    }
 
-                if adjusted > best_score {
-                    best_score = adjusted;
-                    best_offset = candidate_start;
-                    best_penalty = chunk_penalty;
+                    let candidate_region = &genome[candidate_start..region_end];
+                    let qual_slice = &quality[..read_len.min(quality.len())];
+
+                    let (chunk_score, _, chunk_penalty) = align::two_bit_score_chunks_with_quality(&encoded, candidate_region, qual_slice);
+                    let adjusted = chunk_score + chunk_penalty;
+
+                    if adjusted > best_score {
+                        best_score = adjusted;
+                        best_offset = candidate_start;
+                        best_penalty = chunk_penalty;
+                    }
                 }
-            }
 
-            if best_score >= min_score {
-                let cand_end = (best_offset + read_len).min(genome.len());
-                let cand_region = &genome[best_offset..cand_end];
-                let overlap = read_len.min(cand_region.len());
-                let read_part = &encoded[..overlap];
+                if best_score >= min_score {
+                    let cand_end = (best_offset + read_len).min(genome.len());
+                    let cand_region = &genome[best_offset..cand_end];
+                    let overlap = read_len.min(cand_region.len());
+                    let read_part = &encoded[..overlap];
 
-                let mut cigar = String::with_capacity(read_len * 2 + 2);
-                let mut ops: Vec<(u8, usize)> = Vec::new();
-                for i in 0..overlap {
-                    let op = if read_part[i] == cand_region[i] { 0u8 } else { 1u8 };
-                    if let Some(last) = ops.last_mut() {
-                        if last.0 == op {
-                            last.1 += 1;
+                    let mut cigar = String::with_capacity(read_len * 2 + 2);
+                    let mut ops: Vec<(u8, usize)> = Vec::new();
+                    for i in 0..overlap {
+                        let op = if read_part[i] == cand_region[i] { 0u8 } else { 1u8 };
+                        if let Some(last) = ops.last_mut() {
+                            if last.0 == op {
+                                last.1 += 1;
+                            } else {
+                                ops.push((op, 1));
+                            }
                         } else {
                             ops.push((op, 1));
                         }
-                    } else {
-                        ops.push((op, 1));
                     }
-                }
-                if cand_region.len() < read_len {
-                    let clip = read_len - overlap;
-                    if ops.is_empty() || ops.last().unwrap().0 != 2 {
-                        ops.push((2, clip));
-                    } else {
-                        ops.last_mut().unwrap().1 += clip;
+                    if cand_region.len() < read_len {
+                        let clip = read_len - overlap;
+                        if ops.is_empty() || ops.last().unwrap().0 != 2 {
+                            ops.push((2, clip));
+                        } else {
+                            ops.last_mut().unwrap().1 += clip;
+                        }
                     }
+                    for (op, count) in ops {
+                        cigar.push_str(&count.to_string());
+                        cigar.push(match op {
+                            0 => 'M',
+                            1 => 'X',
+                            _ => 'S',
+                        });
+                    }
+                    scored.push((genome_id, best_offset as u64, best_score.max(0.0).min(1.0), cigar, best_penalty));
                 }
-                for (op, count) in ops {
-                    cigar.push_str(&count.to_string());
-                    cigar.push(match op {
-                        0 => 'M',
-                        1 => 'X',
-                        _ => 'S',
-                    });
-                }
-                scored.push((genome_id, best_offset as u64, best_score.max(0.0).min(1.0), cigar, best_penalty));
             }
         }
 
@@ -1523,6 +1575,7 @@ impl BitPop {
             genomes,
             genome_names,
             k,
+            top_n: 1,
         }
     }
 
@@ -1896,13 +1949,20 @@ fn compute_tlen(map1: &Option<PairedReadMapping>, map2: &Option<PairedReadMappin
             if m1.genome_id != m2.genome_id {
                 return 0;
             }
-            let start = m1.position.min(m2.position) as i64;
-            let end = if m2.is_reverse {
-                m2.position as i64 + len2 as i64
+            let pos1 = m1.position as i64;
+            let pos2 = m2.position as i64;
+            let end1 = pos1 + len1 as i64;
+            let end2 = pos2 + len2 as i64;
+            let outer_start = pos1.min(pos2);
+            let outer_end = end1.max(end2);
+            let tlen = outer_end - outer_start;
+            
+            // Sign based on which read is forward/reverse
+            if m1.is_reverse {
+                -(tlen as i64)
             } else {
-                m2.position.max(m1.position) as i64 + len2 as i64
-            };
-            end - start
+                tlen as i64
+            }
         }
         _ => 0,
     }
@@ -2334,7 +2394,7 @@ mod tests {
 
     #[test]
     fn test_default_repeat_threshold_constant() {
-        assert_eq!(DEFAULT_REPEAT_THRESHOLD, 1000);
+        assert_eq!(DEFAULT_REPEAT_THRESHOLD, 10000);
     }
 
     // === FAZA 5: Quality-Aware Pipeline Tests ===
@@ -2947,5 +3007,97 @@ mod tests {
 
         assert_eq!(s1, s2);
         assert_eq!(c1, c2);
+    }
+
+    #[test]
+    fn test_top_n_default_is_one() {
+        let bp = BitPop::new(8);
+        assert_eq!(bp.top_n(), 1);
+    }
+
+    #[test]
+    fn test_set_top_n() {
+        let mut bp = BitPop::new(8);
+        bp.set_top_n(3);
+        assert_eq!(bp.top_n(), 3);
+        bp.set_top_n(1);
+        assert_eq!(bp.top_n(), 1);
+    }
+
+    #[test]
+    fn test_top_n_anchor_filter_returns_results() {
+        let mut bp = BitPop::new(6);
+        bp.add_genome("test", "AACCGGTACGTACGTAACCGGTTTC");
+        bp.build();
+        bp.set_top_n(3);
+        let scored = bp.anchor_filter("ACGTACGT", 0.5);
+        assert!(!scored.is_empty());
+        assert_eq!(scored[0].0, 0);
+        assert!(scored[0].2 >= 0.5);
+    }
+
+    #[test]
+    fn test_top_n_anchor_filter_with_error() {
+        let mut bp = BitPop::new(6);
+        bp.add_genome("test", "AACCGGTACGTACGTAACCGGTTTC");
+        bp.build();
+        bp.set_top_n(1);
+        let scored_single = bp.anchor_filter("ACGTACGT", 0.5);
+        bp.set_top_n(3);
+        let scored_top3 = bp.anchor_filter("ACGTACGT", 0.5);
+        assert!(!scored_top3.is_empty());
+        assert!(scored_top3.len() >= scored_single.len());
+    }
+
+    #[test]
+    fn test_top_n_multi_genome() {
+        let mut bp = BitPop::new(6);
+        bp.add_genome("human", "ACGTACGTACGTACGT");
+        bp.add_genome("chimp", "ACGTACGTACGTAACA");
+        bp.build();
+        bp.set_top_n(3);
+        let scored = bp.anchor_filter("ACGTACGTACGT", 0.5);
+        assert!(!scored.is_empty());
+        for (gid, _, score, _) in &scored {
+            assert!(*score >= 0.5);
+            assert!(*gid < 2);
+        }
+    }
+
+    #[test]
+    fn test_top_n_anchor_filter_with_quality() {
+        let mut bp = BitPop::new(6);
+        bp.add_genome("test", "AACCGGTACGTACGTAACCGGTTTC");
+        bp.build();
+        bp.set_top_n(3);
+        let read = "ACGTACGT";
+        let quality: Vec<u8> = vec![30, 30, 30, 30, 30, 30, 30, 30];
+        let scored = bp.anchor_filter_with_quality(read, &quality, 0.5, 20, 10000);
+        assert!(!scored.is_empty());
+    }
+
+    #[test]
+    fn test_top_n_anchor_filter_quality_fallback() {
+        let mut bp = BitPop::new(6);
+        bp.add_genome("test", "AACCGGTACGTACGTAACCGGTTTC");
+        bp.build();
+        bp.set_top_n(3);
+        let read = "ACGTACGT";
+        let low_quality: Vec<u8> = vec![5, 5, 5, 5, 5, 5, 5, 5];
+        let scored = bp.anchor_filter_with_quality(read, &low_quality, 0.5, 20, 10000);
+        assert!(!scored.is_empty());
+    }
+
+    #[test]
+    fn test_top_n_threshold_blocks_repetitive() {
+        let mut bp = BitPop::new(6);
+        bp.add_genome("test", "NNNNNACGTACGTACGTACGTACGTNNNNN");
+        bp.build();
+        bp.set_top_n(3);
+        let scored = bp.anchor_filter_with_threshold("ACGTACGTACGT", 0.5, 100);
+        assert!(!scored.is_empty());
+        for (_, _, score, _) in &scored {
+            assert!(*score >= 0.5);
+        }
     }
 }

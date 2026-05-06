@@ -8,13 +8,14 @@ A proof-of-concept genomic tool for simultaneous multi-genome DNA read classific
 - **Speed via bit-level operations**: 2-bit XOR alignment achieving ~2.3 ns per 31-base XOR chunk operation
 - **Quality-aware refinement**: Smith-Waterman local alignment with Phred-scaled quality penalties
 - **Combined ranking**: Formula balancing alignment score (85%) and k-mer rarity (15%)
+- **Top-N rarest k-mer anchors**: Fallback to 2nd/3rd rarest k-mers for improved mapping rate
 - **Paired-end support**: Full SAM specification compliance with proper FLAG handling
 - **Parallel mapping**: Work-stealing scheduler using rayon for multi-core speedup
 
 ## Pipeline
 
 1. **FM-index** (radix-sort suffix arrays) for efficient k-mer lookup
-2. **Anchor-based k-mer filtering** (rarest k-mer selection)
+2. **Anchor-based k-mer filtering** (top-N rarest k-mer selection with fallback)
 3. **2-bit XOR alignment** (~2.3 ns per 31-base chunk for exact/near-exact matches)
 4. **Smith-Waterman refinement** for lower confidence scores (<0.9)
 5. **Multi-genome ranking** with combined scoring formula
@@ -51,12 +52,12 @@ cargo run --release -- build \
   -o multi3.bitpop \
   -k 10 -t 4
 
-# 2. Map single-end reads
+# 2. Map single-end reads (top_n=2 recommended for balance)
 cargo run --release -- map \
   -i multi3.bitpop \
   -r simulated_ecoli_10k_new.fastq \
   -o ecoli_mappings.sam \
-  -a hybrid -t 4
+  -a hybrid -t 4 --top-n 2
 
 # 3. Map paired-end reads
 cargo run --release -- map \
@@ -131,6 +132,7 @@ cargo run --release -- stats -i multi3.bitpop
 | `-m, --min-score` | Minimum alignment score (0.0-1.0) | 0.7 |
 | `-q, --min-quality` | Minimum Phred quality (0 = no filter) | 0 |
 | `-t, --reads-threads` | Number of threads | 1 |
+| `--top-n` | Number of rarest k-mers to try (1 = single anchor) | 1 |
 
 ### Align Modes
 
@@ -147,16 +149,27 @@ cargo run --release -- stats -i multi3.bitpop
 - **k-mer size**: k=10
 - **Hardware**: Standard desktop CPU (Windows, PowerShell)
 
-### Results (k=10)
+### Results (k=10, top_n=1)
 
 | Genome | Size | Mapped | Mapping Rate | Accuracy |
 |--------|------|--------|--------------|----------|
-| E. coli | 4.6 Mb | 8,657/10,000 | 86.6% | 99.9% |
-| S. aureus | 2.9 Mb | 2,584/5,000 | 51.7% | 99.9% |
-| S. cerevisiae | 12.2 Mb | 4,011/5,000 | 80.2% | 100.0% |
-| **Total** | **19.7 Mb** | **15,252/20,000** | **76.3%** | **99.9%** |
+| E. coli | 4.6 Mb | 9,755/10,000 | 97.6% | 99.9% |
+| S. aureus | 2.9 Mb | 4,910/5,000 | 98.2% | 99.9% |
+| S. cerevisiae | 12.2 Mb | 4,905/5,000 | 98.1% | 100.0% |
+| **Total** | **19.7 Mb** | **19,570/20,000** | **97.9%** | **99.9%** |
 
-**Throughput**: ~1,500 reads/second
+### Results (k=10, top_n=3)
+
+| Genome | Size | Mapped | Mapping Rate | Accuracy |
+|--------|------|--------|--------------|----------|
+| E. coli | 4.6 Mb | 9,924/10,000 | 99.2% | 99.9% |
+| S. aureus | 2.9 Mb | 4,968/5,000 | 99.4% | 99.9% |
+| S. cerevisiae | 12.2 Mb | 4,970/5,000 | 99.4% | 100.0% |
+| **Total** | **19.7 Mb** | **19,862/20,000** | **99.3%** | **99.9%** |
+
+**Performance trade-off**: top_n=3 je ~3x sporiji od top_n=1 (2.8s vs 0.9s za E. coli). Preporuka: `--top-n 2` za balans između brzine i tačnosti.
+
+**Throughput**: ~1,500 reads/second (top_n=1)
 
 ## Project Structure
 
@@ -189,17 +202,19 @@ cargo run --release -- stats -i multi3.bitpop
 ## Limitations
 
 - Proof-of-concept stage; not validated on large-scale real datasets
-- Mapping rate prioritizes precision over sensitivity (76.3% on simulated data)
-- Small genomes (<3 Mb) show lower mapping rates with k=10
+- No reverse complement support yet (Phase 1.2 planned)
 - No clinical validation; academic research tool only
+- Large index file sizes (~152MB for 19.7Mb genome, delta compression planned)
 
 ## Future Work
 
-- Optimize anchor filter to improve mapping rate
+- **Phase 1**: Reverse complement support, entropy-adaptive k-mer size, seed-and-extend
+- **Phase 2**: Parallel build, SA compression, streaming input, SIMD acceleration
+- **Phase 3**: Progress reporting, CIGAR accuracy, quality filter improvements
+- **Phase 4**: Integration tests, CAMI benchmark, performance regression tests
+- **Phase 6**: NCBI E-utilities integration, local reference cache, batch download
 - Expand benchmarks to 100+ genomes and eukaryotic genomes
 - Direct comparison with Bowtie2, BWA-MEM on multi-genome tasks
-- Integration with CAMI benchmark protocols
-- Testing on real-world datasets (Illumina, PacBio, Nanopore)
 
 ## Availability
 

@@ -36,7 +36,8 @@ pub fn rank_mappings(
 
         // Rarity: how many genomes share the top k-mer?
         // Higher genome_kmer_count = more common = lower rarity score
-        let rarity = 1.0 / (genome_kmer_counts.values().next().copied().unwrap_or(1) as f64);
+        let kmer_occ = genome_kmer_counts.values().sum::<usize>();
+        let rarity = 1.0 / (kmer_occ.max(1) as f64);
 
         // Proximity: more k-mers matched relative to read length = better
         let proximity = (kmer_count as f64 / read_length as f64).min(1.0);
@@ -76,7 +77,7 @@ pub fn deduplicate(results: Vec<MappingResult>, window: u64) -> Vec<MappingResul
 
     for r in sorted {
         let dominated = used.iter().any(|&(gid, pos)| {
-            gid == r.genome_id && pos.abs_diff(r.position) < window
+            gid == r.genome_id && if r.position > pos { r.position - pos } else { pos - r.position } < window
         });
         if !dominated {
             used.push((r.genome_id, r.position));
