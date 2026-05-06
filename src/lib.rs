@@ -98,6 +98,36 @@ pub fn decode_kmer(encoded: u64, k: usize) -> String {
     result.chars().rev().collect()
 }
 
+/// Compute reverse complement of a DNA string.
+/// A<->T, C<->G, then reverse the string.
+pub fn reverse_complement(seq: &str) -> String {
+    seq.chars()
+        .rev()
+        .map(|c| match c.to_ascii_uppercase() {
+            'A' => 'T',
+            'T' => 'A',
+            'C' => 'G',
+            'G' => 'C',
+            other => other,
+        })
+        .collect()
+}
+
+/// Compute reverse complement of a 2-bit encoded sequence.
+/// Swaps A(1)<->T(4), C(2)<->G(3), then reverses byte order.
+pub fn reverse_complement_bytes(encoded: &[u8]) -> Vec<u8> {
+    let complement: Vec<u8> = encoded.iter().map(|&b| match b {
+        1 => 4, // A -> T
+        4 => 1, // T -> A
+        2 => 3, // C -> G
+        3 => 2, // G -> C
+        other => other,
+    }).collect();
+    let mut result = complement;
+    result.reverse();
+    result
+}
+
 // --- MappingResult ---
 
 /// Result of mapping a read to a genome.
@@ -113,6 +143,8 @@ pub struct MappingResult {
     pub cigar: String,
     /// Context: ±window bases around the mapped position.
     pub context: String,
+    /// True if the read mapped to the reverse strand (RC alignment won).
+    pub is_reverse: bool,
 }
 
 /// Quality-aware mapping result with per-base quality information.
@@ -136,6 +168,8 @@ pub struct QualityMappingResult {
     pub quality_scores: Vec<u8>,
     /// Context: ±window bases around the mapped position.
     pub context: String,
+    /// True if the read mapped to the reverse strand (RC alignment won).
+    pub is_reverse: bool,
 }
 
 /// A paired-end read (R1 + R2).
@@ -738,6 +772,7 @@ impl BitPop {
                 score: combined_score,
                 cigar: cigar.clone(),
                 context,
+                is_reverse: false,
             });
         }
 
@@ -791,6 +826,7 @@ impl BitPop {
                 score: combined_score,
                 cigar,
                 context,
+                is_reverse: false,
             });
         }
 
@@ -1420,6 +1456,7 @@ impl BitPop {
                 quality_penalty,
                 quality_scores: quality.to_vec(),
                 context,
+                is_reverse: false,
             });
         }
 
@@ -1453,7 +1490,51 @@ impl BitPop {
 
     /// Full pipeline with configurable alignment mode.
     /// Uses anchor-based filtering with the specified alignment algorithm.
+    /// Tries both forward and reverse complement, returns best alignment.
     pub fn map_read_with_mode(&self, read: &str, mode: AlignMode, context_window: usize) -> Vec<MappingResult> {
+        let forward_results = self.map_read_orientation(read, mode, context_window, false);
+        let rc_read = reverse_complement(read);
+        let rc_results = self.map_read_orientation(&rc_read, mode, context_window, true);
+
+        let best_forward = forward_results.first().cloned();
+        let best_rc = rc_results.first().cloned();
+
+        match (best_forward, best_rc) {
+            (Some(f), Some(r)) => {
+                if r.score > f.score {
+                    let mut results = rc_results;
+                    if !results.is_empty() {
+                        results[0].is_reverse = true;
+                    }
+                    results
+                } else {
+                    let mut results = forward_results;
+                    if !results.is_empty() {
+                        results[0].is_reverse = false;
+                    }
+                    results
+                }
+            }
+            (Some(f), None) => {
+                let mut results = forward_results;
+                if !results.is_empty() {
+                    results[0].is_reverse = false;
+                }
+                results
+            }
+            (None, Some(r)) => {
+                let mut results = rc_results;
+                if !results.is_empty() {
+                    results[0].is_reverse = true;
+                }
+                results
+            }
+            (None, None) => Vec::new(),
+        }
+    }
+
+    /// Map a single orientation (forward or RC) of a read.
+    fn map_read_orientation(&self, read: &str, mode: AlignMode, context_window: usize, _is_rc: bool) -> Vec<MappingResult> {
         let scored = self.anchor_filter_with_mode(read, mode, 0.7, DEFAULT_REPEAT_THRESHOLD);
         if scored.is_empty() {
             return Vec::new();
@@ -1463,6 +1544,7 @@ impl BitPop {
 
     /// Full pipeline: map a read with quality scores to all indexed genomes.
     /// Uses quality-aware anchor filtering + Phred-scaled scoring.
+    /// Tries both forward and reverse complement, returns best alignment.
     pub fn map_read_with_quality_mode(
         &self,
         read: &str,
@@ -1470,6 +1552,57 @@ impl BitPop {
         mode: AlignMode,
         min_quality: u8,
         context_window: usize,
+    ) -> Vec<QualityMappingResult> {
+        let forward_results = self.map_read_quality_orientation(read, quality, mode, min_quality, context_window, false);
+        let rc_read = reverse_complement(read);
+        let rc_results = self.map_read_quality_orientation(&rc_read, quality, mode, min_quality, context_window, true);
+
+        let best_forward = forward_results.first().cloned();
+        let best_rc = rc_results.first().cloned();
+
+        match (best_forward, best_rc) {
+            (Some(f), Some(r)) => {
+                if r.combined_score > f.combined_score {
+                    let mut results = rc_results;
+                    if !results.is_empty() {
+                        results[0].is_reverse = true;
+                    }
+                    results
+                } else {
+                    let mut results = forward_results;
+                    if !results.is_empty() {
+                        results[0].is_reverse = false;
+                    }
+                    results
+                }
+            }
+            (Some(f), None) => {
+                let mut results = forward_results;
+                if !results.is_empty() {
+                    results[0].is_reverse = false;
+                }
+                results
+            }
+            (None, Some(r)) => {
+                let mut results = rc_results;
+                if !results.is_empty() {
+                    results[0].is_reverse = true;
+                }
+                results
+            }
+            (None, None) => Vec::new(),
+        }
+    }
+
+    /// Map a single orientation (forward or RC) of a read with quality scores.
+    fn map_read_quality_orientation(
+        &self,
+        read: &str,
+        quality: &[u8],
+        mode: AlignMode,
+        min_quality: u8,
+        context_window: usize,
+        _is_rc: bool,
     ) -> Vec<QualityMappingResult> {
         let scored = self.anchor_filter_with_quality_smart(read, quality, 0.7, min_quality, DEFAULT_REPEAT_THRESHOLD);
         if scored.is_empty() {
@@ -1512,6 +1645,7 @@ impl BitPop {
                 quality_penalty,
                 quality_scores: quality.to_vec(),
                 context,
+                is_reverse: false,
             });
         }
 
@@ -1803,7 +1937,7 @@ impl BitPop {
             position: best.position,
             score: best.score,
             cigar: best.cigar.clone(),
-            is_reverse: false, // determined by alignment context below
+            is_reverse: best.is_reverse,
             mapped: true,
         })
     }
@@ -1927,7 +2061,7 @@ impl BitPop {
     }
 
     fn map_paired_read_with_quality(&self, seq: &str, qual: &[u8], min_quality: u8) -> Option<PairedReadMapping> {
-        let results = self.map_read_with_quality(seq, qual, min_quality, 0);
+        let results = self.map_read_with_quality_mode(seq, qual, AlignMode::Hybrid, min_quality, 0);
         if results.is_empty() {
             return None;
         }
@@ -1937,7 +2071,7 @@ impl BitPop {
             position: best.position,
             score: best.combined_score,
             cigar: best.cigar.clone(),
-            is_reverse: false,
+            is_reverse: best.is_reverse,
             mapped: true,
         })
     }
@@ -3099,5 +3233,79 @@ mod tests {
         for (_, _, score, _) in &scored {
             assert!(*score >= 0.5);
         }
+    }
+
+    #[test]
+    fn test_reverse_complement_basic() {
+        assert_eq!(reverse_complement("ACGT"), "ACGT");
+        assert_eq!(reverse_complement("ATCG"), "CGAT");
+        assert_eq!(reverse_complement("AAA"), "TTT");
+        assert_eq!(reverse_complement("CCCC"), "GGGG");
+        assert_eq!(reverse_complement("GGGG"), "CCCC");
+        assert_eq!(reverse_complement("TTTT"), "AAAA");
+    }
+
+    #[test]
+    fn test_reverse_complement_bytes() {
+        let encoded = encode_sequence("ACGT");
+        let rc = reverse_complement_bytes(&encoded);
+        let rc_seq = decode_sequence(&rc);
+        assert_eq!(rc_seq, "ACGT");
+
+        let encoded2 = encode_sequence("ATCG");
+        let rc2 = reverse_complement_bytes(&encoded2);
+        let rc_seq2 = decode_sequence(&rc2);
+        assert_eq!(rc_seq2, "CGAT");
+    }
+
+    #[test]
+    fn test_reverse_complement_double_rc() {
+        let original = "ACGTACGTATCG";
+        let rc1 = reverse_complement(original);
+        let rc2 = reverse_complement(&rc1);
+        assert_eq!(original, rc2);
+    }
+
+    #[test]
+    fn test_reverse_complement_with_n() {
+        let rc = reverse_complement("ACNNGT");
+        assert_eq!(rc, "ACNNGT");
+    }
+
+    #[test]
+    fn test_map_read_reverse_complement_forward_wins() {
+        let mut bp = BitPop::new(10);
+        bp.add_genome("genome1", "ACGTACGTACGTACGTACGT");
+        bp.build();
+
+        let read = "ACGTACGTACGT";
+        let results = bp.map_read_with_mode(read, AlignMode::Xor, 5);
+        assert!(!results.is_empty());
+        assert_eq!(results[0].genome_id, 0);
+        assert!(!results[0].is_reverse, "Forward alignment should win for perfect match");
+    }
+
+    #[test]
+    fn test_map_read_reverse_complement_rc_wins() {
+        let mut bp = BitPop::new(10);
+        bp.add_genome("genome1", "ACGTACGTACGTACGTACGT");
+        bp.build();
+
+        let rc_read = reverse_complement("ACGTACGTACGT");
+        let results = bp.map_read_with_mode(&rc_read, AlignMode::Xor, 5);
+        assert!(!results.is_empty());
+        assert_eq!(results[0].genome_id, 0);
+    }
+
+    #[test]
+    fn test_map_read_reverse_complement_no_forward_match() {
+        let mut bp = BitPop::new(10);
+        bp.add_genome("genome1", "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG");
+        bp.build();
+
+        let read = "CCCCCCCCCCCC";
+        let results = bp.map_read_with_mode(read, AlignMode::Xor, 5);
+        assert!(!results.is_empty());
+        assert_eq!(results[0].genome_id, 0);
     }
 }

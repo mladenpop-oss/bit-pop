@@ -52,6 +52,7 @@ pub fn rank_mappings(
             score: final_score,
             cigar: format!("{}M", read_length),
             context: String::new(),
+            is_reverse: false,
         });
     }
 
@@ -129,9 +130,9 @@ mod tests {
     #[test]
     fn test_filter_by_score() {
         let results = vec![
-            MappingResult { genome_id: 0, position: 100, score: 0.9, cigar: "10M".into(), context: String::new() },
-            MappingResult { genome_id: 0, position: 200, score: 0.5, cigar: "10M".into(), context: String::new() },
-            MappingResult { genome_id: 0, position: 300, score: 0.3, cigar: "10M".into(), context: String::new() },
+            MappingResult { genome_id: 0, position: 100, score: 0.9, cigar: "10M".into(), context: String::new(), is_reverse: false },
+            MappingResult { genome_id: 0, position: 200, score: 0.5, cigar: "10M".into(), context: String::new(), is_reverse: false },
+            MappingResult { genome_id: 0, position: 300, score: 0.3, cigar: "10M".into(), context: String::new(), is_reverse: false },
         ];
         let filtered = filter_by_score(results, 0.6);
         assert_eq!(filtered.len(), 1);
@@ -141,9 +142,9 @@ mod tests {
     #[test]
     fn test_deduplicate() {
         let results = vec![
-            MappingResult { genome_id: 0, position: 100, score: 0.9, cigar: "10M".into(), context: String::new() },
-            MappingResult { genome_id: 0, position: 102, score: 0.85, cigar: "10M".into(), context: String::new() },
-            MappingResult { genome_id: 0, position: 500, score: 0.8, cigar: "10M".into(), context: String::new() },
+            MappingResult { genome_id: 0, position: 100, score: 0.9, cigar: "10M".into(), context: String::new(), is_reverse: false },
+            MappingResult { genome_id: 0, position: 102, score: 0.85, cigar: "10M".into(), context: String::new(), is_reverse: false },
+            MappingResult { genome_id: 0, position: 500, score: 0.8, cigar: "10M".into(), context: String::new(), is_reverse: false },
         ];
         let deduped = deduplicate(results, 10);
         assert_eq!(deduped.len(), 2);

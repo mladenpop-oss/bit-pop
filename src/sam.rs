@@ -58,6 +58,10 @@ impl SamWriter {
             sam_flag |= flag::SUPPLEMENTARY;
         }
 
+        if result.is_reverse {
+            sam_flag |= flag::REVERSE;
+        }
+
         // MAPQ: convert score (0.0-1.0) to Phred-scaled quality (0-60)
         let mapq = (result.score * 60.0) as u16;
 
@@ -144,6 +148,10 @@ impl SamWriter {
             let mut sam_flag: u16 = 0;
             if is_supplementary {
                 sam_flag |= flag::SUPPLEMENTARY;
+            }
+
+            if result.is_reverse {
+                sam_flag |= flag::REVERSE;
             }
 
             let mapq = ((result.combined_score * 60.0) as u16).min(60);
@@ -361,6 +369,7 @@ mod tests {
             score: 0.95,
             cigar: "50M".to_string(),
             context: String::new(),
+            is_reverse: false,
         };
 
         writer
@@ -394,6 +403,7 @@ mod tests {
                 score: 0.95,
                 cigar: "50M".to_string(),
                 context: String::new(),
+                is_reverse: false,
             },
             MappingResult {
                 genome_id: 1,
@@ -401,6 +411,7 @@ mod tests {
                 score: 0.80,
                 cigar: "50M".to_string(),
                 context: String::new(),
+                is_reverse: false,
             },
         ];
 
@@ -458,6 +469,7 @@ mod tests {
             score: 1.0,
             cigar: "100M".to_string(),
             context: String::new(),
+            is_reverse: false,
         };
 
         writer
