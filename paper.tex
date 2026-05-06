@@ -29,7 +29,7 @@
 \maketitle
 
 \begin{abstract}
-I present Bit-Pop, a proof-of-concept genomic tool for simultaneous multi-genome DNA read classification. While existing aligners such as Bowtie2, BWA, and minimap2 map reads to single reference genomes, Bit-Pop addresses the complementary problem of identifying which genome in a collection best matches each read. The pipeline combines three stages: (1) an FM-index based on suffix arrays (SA-IS via libsais) for efficient k-mer lookup across all indexed genomes; (2) a bit-level 2-bit XOR alignment achieving approximately 2.3 ns per 31-base XOR chunk operation; and (3) Smith--Waterman local alignment refinement \citep{smith1981} with Phred-scaled quality-aware scoring. A combined ranking formula ($\text{combined\_score} = \text{align} \times 0.85 + \text{rarity} \times 0.15$) scores each read against all indexed genomes and returns the best match with contextual flanking sequence. Benchmarked on simulated Illumina-like reads (0.1\%--10\% error rate, 100 bp) across three distantly related genomes spanning bacteria and eukaryotes (\textit{Escherichia coli}, \textit{Staphylococcus aureus}, and \textit{Saccharomyces cerevisiae}), Bit-Pop achieves 99.9\% classification accuracy on correctly mapped reads at approximately 1,500 reads/second for the full pipeline (including anchor filtering, XOR scoring, and ranking). Classification accuracy remains at 100\% across all tested error rates (0.1\%--10\%), with mapping rate degrading gracefully from 88.4\% at 0.1\% error rate to 69.3\% at 2\% error rate. The tool supports paired-end mapping with proper SAM FLAG handling, insert size statistics via Welford's algorithm, and real CIGAR string generation including indel operations through chunked Smith-Waterman alignment for reads exceeding 31 bp. Bit-Pop is designed as a focused academic tool for species classification, pangenome analysis, and contamination detection.
+I present Bit-Pop, a proof-of-concept genomic tool for simultaneous multi-genome DNA read classification. While existing aligners such as Bowtie2, BWA, and minimap2 map reads to single reference genomes, Bit-Pop addresses the complementary problem of identifying which genome in a collection best matches each read. The pipeline combines three stages: (1) an FM-index based on suffix arrays (SA-IS via libsais) for efficient k-mer lookup across all indexed genomes; (2) a top-$N$ rarest k-mer anchor filter with reverse complement support; and (3) a bit-level 2-bit XOR alignment achieving approximately 2.3 ns per 31-base XOR chunk operation, with Smith--Waterman local alignment refinement \citep{smith1981} for lower confidence scores. A combined ranking formula ($\text{combined\_score} = \text{align} \times 0.85 + \text{rarity} \times 0.15$) scores each read against all indexed genomes and returns the best match with contextual flanking sequence. Benchmarked on simulated Illumina-like reads (0.1\%--10\% error rate, 100 bp) across three distantly related genomes spanning bacteria and eukaryotes (\textit{Escherichia coli}, \textit{Staphylococcus aureus}, and \textit{Saccharomyces cerevisiae}), Bit-Pop achieves 99.9\% classification accuracy on correctly mapped reads at approximately 1,500 reads/second for the full pipeline. Classification accuracy remains at 100\% across all tested error rates (0.1\%--10\%), with mapping rate degrading gracefully from 88.4\% at 0.1\% error rate to 23.4\% at 10\% error rate. The tool supports paired-end mapping with proper SAM FLAG handling (including reverse strand flags), insert size statistics via Welford's algorithm, and real CIGAR string generation including indel operations through chunked Smith-Waterman alignment for reads exceeding 31 bp. Bit-Pop is designed as a focused academic tool for species classification, pangenome analysis, and contamination detection.
 
 \textbf{Availability:} Source code at \url{https://github.com/mladenpop-oss/bit-pop} (MIT License).
 \end{abstract}
@@ -45,6 +45,8 @@ Bit-Pop was designed to solve the second task efficiently. Given a collection of
 The key design principles are:
 \begin{itemize}
     \item \textbf{Multi-genome indexing:} All reference genomes are indexed in a single FM-index structure, enabling unified k-mer lookup across the entire collection.
+    \item \textbf{Top-$N$ anchor filtering:} Instead of a single rarest k-mer, the top-$N$ rarest k-mers are used as anchors with fallback to secondary anchors when the primary anchor contains sequencing errors, significantly improving mapping rate.
+    \item \textbf{Reverse complement support:} Both forward and reverse complement orientations are evaluated for each read, with the best alignment selected and properly flagged in SAM output (0x10 REVERSE flag).
     \item \textbf{Speed via bit-level operations:} DNA bases are encoded in 2 bits (A=00, C=01, G=10, T=11), enabling alignment of up to 31 bases per CPU word through XOR comparison---achieving approximately 2.3 ns per 31-base XOR chunk for exact or near-exact matches.
     \item \textbf{Quality-aware refinement:} For reads with lower confidence XOR scores, Smith-Waterman local alignment with Phred-scaled quality penalties provides precise scoring and CIGAR string generation.
     \item \textbf{Combined ranking:} A formula balancing alignment score (85\% weight) and k-mer rarity (15\% weight) ranks candidates across genomes.
@@ -73,18 +75,18 @@ Persisted indexes are stored using \texttt{memmap2} for memory-mapped file acces
 
 \subsection{Anchor-Based K-mer Filtering}
 
-The first stage of mapping uses an anchor-based filter to identify candidate positions across all indexed genomes. Given a read of length $R$, the algorithm:
+The first stage of mapping uses a top-$N$ anchor-based filter to identify candidate positions across all indexed genomes. Given a read of length $R$, the algorithm:
 
 \begin{enumerate}
     \item Extracts all overlapping k-mers (configurable, default $k=10$ for benchmarks) from the read.
     \item For each k-mer, queries the FM-index to count its total occurrences across all genomes using backward search.
-    \item Selects the \textbf{rarest} k-mer as the anchor---the one with fewest total positions---maximizing discriminative power.
-    \item Retrieves all positions of the anchor k-mer via backward search.
+    \item Selects the \textbf{top-$N$ rarest} k-mers as anchors---those with fewest total positions---providing fallback candidates when the primary anchor contains sequencing errors.
+    \item For each anchor k-mer, retrieves all positions via backward search.
     \item Applies smart stride sampling: if more than 100 anchor positions are found, they are subsampled with stride $\lceil n/100 \rceil$ to avoid redundant close alignments.
     \item Skips highly repetitive k-mers exceeding a configurable threshold (default $10^4$ total occurrences).
 \end{enumerate}
 
-This approach is significantly more efficient than iterating all k-mers in the read when the genome collection contains many repetitive elements. The rarest-k-mer anchor minimizes the number of candidate positions while maximizing the probability of finding the correct genomic location.
+This approach is significantly more efficient than iterating all k-mers in the read when the genome collection contains many repetitive elements. The top-$N$ rarest k-mer anchors minimize false negatives caused by sequencing errors in the anchor k-mer while maintaining high discriminative power.
 
 Quality-aware filtering further refines this stage: k-mers containing bases with Phred quality below a minimum threshold (default Q20) are excluded from anchor selection, reducing false positives in low-quality regions.
 
@@ -192,22 +194,22 @@ Table~\ref{tab:multigenome} shows results for mapping 20,000 simulated reads (10
 
 \begin{table}[h]
 \centering
-\caption{Multi-genome benchmark: 20,000 simulated reads mapped to 3-genome index ($k=10$)}
+\caption{Multi-genome benchmark: 20,000 simulated reads mapped to 3-genome index ($k=10$, top-N anchors with reverse complement support)}
 \label{tab:multigenome}
 \begin{tabular}{lccc}
 \toprule
 \textbf{Genome} & \textbf{Mapped} & \textbf{Correct} & \textbf{Accuracy} \\
 \midrule
-\textit{E. coli} (4.6 Mb) & 8,657/10,000 (86.6\%) & 8,650 & 99.9\% \\
-\textit{S. aureus} (2.9 Mb) & 2,584/5,000 (51.7\%) & 2,582 & 99.9\% \\
-\textit{S. cerevisiae} (12.2 Mb) & 4,011/5,000 (80.2\%) & 4,011 & 100.0\% \\
+\textit{E. coli} (4.6 Mb) & 9,758/10,000 (97.6\%) & 9,754 & 99.9\% \\
+\textit{S. aureus} (2.9 Mb) & 4,913/5,000 (98.3\%) & 4,911 & 99.9\% \\
+\textit{S. cerevisiae} (12.2 Mb) & 4,908/5,000 (98.2\%) & 4,908 & 100.0\% \\
 \midrule
-\textbf{Total} & \textbf{15,252/20,000 (76.3\%)} & \textbf{15,243} & \textbf{99.9\%} \\
+\textbf{Total} & \textbf{19,579/20,000 (97.9\%)} & \textbf{19,573} & \textbf{99.9\%} \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The tool achieves 99.9\% classification accuracy on correctly mapped reads across bacterial and eukaryotic genomes spanning different domains of life. The overall mapping rate of 76.3\% reflects the anchor-based k-mer filter's preference for precision over sensitivity. Notably, S. aureus (2.9 Mb) shows lower mapping rate (51.7\%), likely due to the smaller genome size making $k=10$ k-mers less discriminative. Mapping throughput was approximately 1,500 reads/second.
+The tool achieves 99.9\% classification accuracy on correctly mapped reads across bacterial and eukaryotic genomes spanning different domains of life. The overall mapping rate of 97.9\% demonstrates the effectiveness of the top-$N$ anchor filter and reverse complement support. The small-genome bias observed in earlier versions (S. aureus at 51.7\%) is resolved with top-$N$ anchors, achieving 98.3\% mapping rate. Reverse complement orientation is used for approximately 1.1\% of reads, with proper SAM FLAG 0x10 (REVERSE) marking. Mapping throughput is approximately 1,500 reads/second.
 
 \subsection{Error Tolerance}
 
@@ -266,7 +268,7 @@ Initial testing was performed on publicly available Illumina paired-end reads (S
 
 \section{Discussion}
 
-Bit-Pop demonstrates that multi-genome read classification is feasible using a combination of FM-index-based filtering, bit-level XOR alignment, and Smith-Waterman refinement. The tool achieves 99.9\% classification accuracy on correctly mapped reads across bacterial and eukaryotic genomes, with a mapping rate of 76.3\% on simulated reads with 0.1\% error rate. Importantly, classification accuracy remains at 100\% across all tested error rates (0.1\%--10\%), indicating that the anchor filter affects mapping sensitivity but not classification precision.
+Bit-Pop demonstrates that multi-genome read classification is feasible using a combination of FM-index-based top-$N$ k-mer filtering with reverse complement support, bit-level XOR alignment, and Smith-Waterman refinement. The tool achieves 99.9\% classification accuracy on correctly mapped reads across bacterial and eukaryotic genomes, with a mapping rate of 97.9\% on simulated reads with 0.1\% error rate. The improvement from 76.3\% to 97.9\% mapping rate was achieved through two key algorithmic enhancements: (1) top-$N$ rarest k-mer anchors providing fallback candidates when the primary anchor contains sequencing errors, and (2) reverse complement support evaluating both DNA strand orientations. Importantly, classification accuracy remains at 100\% across all tested error rates (0.1\%--10\%), indicating that the anchor filter affects mapping sensitivity but not classification precision. The small-genome bias previously observed with S. aureus (51.7\% mapping rate) is resolved with top-$N$ anchors (98.3\%), demonstrating that the issue was due to insufficient anchor diversity rather than fundamental algorithmic limitations.
 
 \subsection{Comparison with Existing Tools}
 
@@ -309,8 +311,8 @@ Bit-Pop's unique capability---simultaneous mapping across thousands of genomes w
 Several limitations should be noted:
 \begin{itemize}
 \item \textbf{Proof-of-concept stage:} This work presents benchmarks on simulated reads across three genomes spanning bacteria and eukaryotes. The tool has not yet been validated on large-scale real datasets or compared directly with established aligners such as Bowtie2 or BWA-MEM.
-\item \textbf{Mapping rate:} The current anchor filter prioritizes precision over sensitivity, resulting in a 76.3\% mapping rate on simulated data with 0.1\% error rate and 69.3\% at 2\% error rate. The degradation is caused by the rarest-k-mer anchor strategy: when a sequencing error affects the selected anchor k-mer, the read cannot be mapped. Optimization of the anchor selection strategy (e.g., considering multiple candidate anchors) is a priority for future work.
-\item \textbf{Small genome bias:} S. aureus (2.9 Mb) shows lower mapping rate (51.7\%) compared to larger genomes, suggesting k-mer size may need adjustment for smaller genomes.
+\item \textbf{Mapping rate at high error rates:} While the top-$N$ anchor filter and reverse complement support have improved mapping rate to 97.9\% at 0.1\% error rate, performance degrades to 23.4\% at 10\% error rate. The degradation is caused by the anchor filter's reliance on rare k-mers: when sequencing errors affect multiple k-mers in a read, anchor positions cannot be found. Optimization of the anchor selection strategy for high-error scenarios remains a priority.
+\item \textbf{Performance trade-off with top-$N$:} Using top-$N$ rarest k-mers (e.g., $N=3$) improves mapping rate by ~1.4\% but increases computation time by ~3x compared to single-anchor mode. The recommended setting ($N=2$) provides a balance between speed and accuracy.
 \item \textbf{Limited genome diversity:} Benchmarks cover only three genomes. Performance on larger collections (hundreds of genomes) or more diverse eukaryotic genomes has not been tested.
     \item \textbf{No clinical validation:} Bit-Pop is an academic research tool and has not been validated for clinical or diagnostic use.
 \end{itemize}
@@ -319,17 +321,20 @@ Several limitations should be noted:
 
 Planned improvements include:
 \begin{itemize}
-    \item Optimizing the anchor filter to improve mapping rate while maintaining high classification accuracy (e.g., considering top-$N$ rarest k-mers instead of a single anchor).
     \item Expanding benchmarks to include larger genome collections (100+ genomes) and eukaryotic genomes.
     \item Direct comparison with established aligners (Bowtie2, BWA-MEM) on multi-genome classification tasks.
     \item Integration with CAMI benchmark protocols for standardized metagenomic evaluation.
     \item Testing on larger real-world sequencing datasets with various error profiles (Illumina, PacBio, Nanopore).
-    \item Adaptive k-mer size selection based on genome size to address small-genome bias.
+    \item Entropy-adaptive k-mer size selection based on genome characteristics to further optimize small-genome performance.
+    \item Seed-and-extend approach requiring consensus across multiple anchor k-mers to reduce false positives.
+    \item Parallel genome encoding and suffix array construction for faster index building on multi-core systems.
+    \item Delta-VLI compression of suffix arrays to reduce index file sizes by 5--10x.
+    \item SIMD (AVX2/AVX-512) acceleration of the 2-bit XOR alignment pipeline.
 \end{itemize}
 
 \section{Conclusion}
 
-Bit-Pop provides a solution for multi-genome DNA read classification. By combining FM-index-based k-mer filtering with bit-level XOR alignment and quality-aware Smith-Waterman refinement, it achieves 99.9\% classification accuracy on correctly mapped reads across bacterial and eukaryotic genomes. Classification accuracy remains at 100\% across all tested error rates (0.1\%--10\%), demonstrating that the tool's precision is robust to sequencing errors. While the current mapping rate of 76.3\% (at 0.1\% error rate) and 69.3\% (at 2\% error rate) indicates room for optimization, the results demonstrate the feasibility of the approach and provide a foundation for future development. The tool is designed as a focused academic resource for species classification, pangenome analysis, and contamination detection---filling a niche not addressed by existing general-purpose aligners.
+Bit-Pop provides a solution for multi-genome DNA read classification. By combining FM-index-based top-$N$ k-mer filtering with reverse complement support, bit-level XOR alignment, and quality-aware Smith-Waterman refinement, it achieves 99.9\% classification accuracy on correctly mapped reads across bacterial and eukaryotic genomes. Classification accuracy remains at 100\% across all tested error rates (0.1\%--10\%), demonstrating that the tool's precision is robust to sequencing errors. The mapping rate of 97.9\% (at 0.1\% error rate) with top-$N$ anchors and reverse complement support represents a significant improvement over earlier single-anchor implementations (76.3\%), while maintaining perfect classification accuracy. The small-genome bias previously observed with S. aureus (51.7\%) is resolved with the top-$N$ anchor strategy (98.3\%). While performance degrades to 23.4\% at 10\% error rate, the results demonstrate the feasibility of the approach and provide a foundation for future development. The tool is designed as a focused academic resource for species classification, pangenome analysis, and contamination detection---filling a niche not addressed by existing general-purpose aligners.
 
 \section*{Availability}
 
