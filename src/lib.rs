@@ -7,6 +7,9 @@ pub mod sam;
 pub mod serialize;
 pub mod persisted;
 pub mod fastq;
+pub mod ncbi;
+pub mod cache;
+pub mod index_manager;
 
 use std::fmt;
 

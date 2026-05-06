@@ -14,14 +14,20 @@ git clone https://github.com/anomalyco/bit-pop.git
 cd bit-pop
 cargo build --release
 
-# 2. Map 10k E. coli reads → 97.6% mapped in 0.9s
-cargo run --release -- build \
-  -f Ecoli_K12_MG1655.fna -f CP029198.1.fasta -f Sac_cerevisiae_complete.fasta \
-  -o multi3.bitpop -k 10 -t 4
+# 2. One-command workflow: build index + map reads
+./target/release/bit-pop run \
+  data/genomes/Ecoli_K12_MG1655.fna \
+  data/reads/simulated_ecoli_10k_new.fastq
 
-cargo run --release -- map -i multi3.bitpop \
-  -r simulated_ecoli_10k_new.fastq \
-  -o ecoli_mappings.sam --top-n 2 -t 4
+# 3. Paired-end mode
+./target/release/bit-pop run \
+  data/genomes/Ecoli_K12_MG1655.fna \
+  -1 data/reads/R1.fastq -2 data/reads/R2.fastq
+
+# 4. Download from NCBI and map
+./target/release/bit-pop run \
+  --ncbi "Escherichia coli" \
+  data/reads/simulated_ecoli_10k_new.fastq
 ```
 
 See [Usage](#usage) for full documentation.
@@ -36,6 +42,9 @@ See [Usage](#usage) for full documentation.
 - **Reverse complement support**: Full RC-aware mapping with proper SAM FLAG 0x10 handling
 - **Paired-end support**: Full SAM specification compliance with proper FLAG handling
 - **Parallel mapping**: Work-stealing scheduler using rayon for multi-core speedup
+- **Auto index caching**: Reuses `.bitpop` files when genomes haven't changed
+- **NCBI integration**: Download genomes directly from NCBI with `--ncbi` flag
+- **Smart defaults**: Automatic output paths, index detection, and progress reporting
 
 ## Comparison with Existing Tools
 
@@ -46,6 +55,7 @@ See [Usage](#usage) for full documentation.
 | Index size (19.7 Mb) | **~152 MB** | ~200 MB | ~250 MB | ~180 MB |
 | Quality-aware alignment | ✅ Phred-scaled | ✅ | ✅ | ✅ |
 | Paired-end support | ✅ | ✅ | ✅ | ✅ |
+| NCBI integration | ✅ Built-in | ❌ | ❌ | ❌ |
 | Rust + bit-parallel | ✅ | C++ | C | C++ |
 
 **When to use Bit-Pop**: Fast multi-genome classification where you need to identify which genome a read belongs to, rather than precise positional alignment.
@@ -80,7 +90,35 @@ pip install biopython
 
 ## Usage
 
-### Build Index
+### One-Command Workflow (Recommended)
+
+```bash
+# Single-end mode
+./target/release/bit-pop run genome.fna reads.fastq
+
+# Single-end with explicit reads flag
+./target/release/bit-pop run genome.fna -r reads.fastq
+
+# Paired-end mode
+./target/release/bit-pop run genome.fna -1 R1.fastq -2 R2.fastq
+
+# Multiple genomes from folder
+./target/release/bit-pop run genomes/ reads.fastq
+
+# Download from NCBI and map
+./target/release/bit-pop run --ncbi "Escherichia coli" reads.fastq
+
+# With custom options
+./target/release/bit-pop run genome.fna -r reads.fastq \
+  -o output.sam \
+  -k 8 \
+  -q 20 \
+  -t 4
+```
+
+### Advanced Commands
+
+#### Build Index
 
 ```bash
 ./target/release/bit-pop build \
@@ -90,7 +128,7 @@ pip install biopython
   -t 4
 ```
 
-### Map Reads
+#### Map Reads
 
 ```bash
 # Single-end
@@ -111,13 +149,13 @@ pip install biopython
   -t 4
 ```
 
-### Show Index Statistics
+#### Show Index Statistics
 
 ```bash
 ./target/release/bit-pop stats -i index.bitpop
 ```
 
-### Add Genomes to Existing Index
+#### Add Genomes to Existing Index
 
 ```bash
 ./target/release/bit-pop load \
@@ -126,20 +164,44 @@ pip install biopython
   -o updated.bitpop
 ```
 
-### Map Reads Options
+#### Search NCBI
+
+```bash
+./target/release/bit-pop search \
+  --organism "Escherichia coli" \
+  -n 10
+```
+
+#### Fetch Genome from NCBI
+
+```bash
+./target/release/bit-pop fetch \
+  --accession NC_000913.3 \
+  -o index.bitpop
+```
+
+#### Update Cached Genomes
+
+```bash
+./target/release/bit-pop update
+```
+
+### `run` Command Options
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `-i, --index` | Input index path | (required) |
-| `-r, --reads` | Input FASTQ/FASTA file | (required for single-end) |
+| `genome` | Genome file, folder, or NCBI organism | (required) |
+| `-r, --reads` | Reads file for single-end mode | (required) |
 | `-1, --reads-1` | R1 FASTQ for paired-end | (required with -2) |
 | `-2, --reads-2` | R2 FASTQ for paired-end | (required with -1) |
-| `-o, --output` | Output SAM file | (required) |
-| `-a, --align-mode` | Alignment mode: xor, sw, hybrid | xor |
+| `--ncbi` | Fetch genome from NCBI | false |
+| `-o, --output` | Output SAM file | `<reads_name>.sam` |
+| `-k, --k` | K-mer size | 10 |
+| `-a, --align-mode` | Alignment mode: xor, sw, hybrid | hybrid |
 | `-m, --min-score` | Minimum alignment score (0.0-1.0) | 0.7 |
 | `-q, --min-quality` | Minimum Phred quality (0 = no filter) | 0 |
-| `-t, --reads-threads` | Number of threads | 1 |
-| `--top-n` | Number of rarest k-mers to try (1 = single anchor) | 1 |
+| `-t, --threads` | Number of threads | 1 |
+| `--force` | Force rebuild index | false |
 
 ### Align Modes
 
@@ -181,30 +243,57 @@ pip install biopython
 ## Project Structure
 
 ```
-├── src/                    # Rust source code
-├── benches/                # Benchmark scripts
+├── src/                    # Rust source code (14 modules)
+├── benches/                # Benchmark scripts (Criterion)
+├── tests/                  # Integration tests
+├── data/
+│   ├── genomes/            # Reference genomes (.fna, .fasta)
+│   ├── reads/              # Sequencing reads (.fastq)
+│   └── indices/            # Generated index files (.bitpop)
+├── scripts/
+│   ├── simulate_reads.py   # Read simulation (Biopython)
+│   └── analyze_benchmark_new.ps1 # Benchmark analysis
+├── docs/
+│   ├── paper.tex           # Academic paper
+│   ├── paper.pdf           # Compiled paper
+│   ├── references.bib      # Bibliography
+│   └── CITATION.cff        # Citation metadata
 ├── Cargo.toml              # Rust project configuration
-├── paper.tex               # Academic paper
-├── references.bib          # Bibliography
-├── simulate_reads.py       # Read simulation tool
-├── analyze_benchmark_new.ps1 # Benchmark analysis
 └── README.md               # This file
 ```
 
 ### Data Files
 
 **Genomes:**
-- `Ecoli_K12_MG1655.fna` - E. coli K-12 MG1655 (4.6 Mb)
-- `CP029198.1.fasta` - Staphylococcus aureus (2.9 Mb)
-- `Sac_cerevisiae_complete.fasta` - S. cerevisiae S288C (12.2 Mb)
+- `data/genomes/Ecoli_K12_MG1655.fna` - E. coli K-12 MG1655 (4.6 Mb)
+- `data/genomes/CP029198.1.fasta` - Staphylococcus aureus (2.9 Mb)
+- `data/genomes/Sac_cerevisiae_complete.fasta` - S. cerevisiae S288C (12.2 Mb)
 
 **Simulated Reads:**
-- `simulated_ecoli_10k_new.fastq` - 10,000 E. coli reads
-- `simulated_aureus_5k_new.fastq` - 5,000 S. aureus reads
-- `simulated_cerevisiae_5k_new.fastq` - 5,000 S. cerevisiae reads
+- `data/reads/simulated_ecoli_10k_new.fastq` - 10,000 E. coli reads
+- `data/reads/simulated_aureus_5k_new.fastq` - 5,000 S. aureus reads
+- `data/reads/simulated_cerevisiae_5k_new.fastq` - 5,000 S. cerevisiae reads
 
 **Real Reads (examples):**
 - `SRR1060563_1.fastq` / `_2.fastq` - Salmonella paired-end (~1.1M pairs)
+
+## Testing
+
+```bash
+# Run all tests (unit + integration)
+cargo test
+
+# Run only integration tests
+cargo test --test integration_tests
+
+# Run benchmarks
+cargo bench
+```
+
+**Test coverage:**
+- 248 unit tests (alignment, indexing, serialization, SAM output)
+- 5 integration tests (build, map, multi-genome, SAM format, cache reuse)
+- Criterion benchmarks for performance tracking
 
 ## Limitations
 
@@ -212,7 +301,6 @@ pip install biopython
 - No clinical validation; academic research tool only
 - Index file sizes ~152MB for 19.7Mb genome (delta compression planned)
 - Chunked reads (>31bp) use generic CIGAR without per-base mismatch detail
-- No NCBI/Ensembl integration yet (manual FASTA download required)
 
 ## Development Roadmap
 
@@ -220,18 +308,20 @@ pip install biopython
 - **Phase 0**: Critical bug fixes (rarity calculation, TLEN, BWT serialization, panic fixes)
 - **Phase 1.1**: Top-N rarest k-mer anchors (97.9% → 99.3% mapping rate)
 - **Phase 1.2**: Reverse complement support with SAM FLAG 0x10
+- **Phase 1.3**: Paired-end support with full SAM compliance
+- **Phase 6**: NCBI E-utilities integration (search, fetch, update commands)
+- **UX**: `run` command with auto-index caching and smart defaults
+- **Tests**: Integration test suite (5 tests)
 
 ### 🔧 In Progress
-- **Phase 1.3**: Entropy-adaptive k-mer size (auto-scale k for small genomes)
-- **Phase 2.5**: `count_ones` optimization (4-8x speedup on alignment)
 - **Phase 1.4**: Seed-and-extend multi-anchor filtering
+- **Phase 2.5**: `count_ones` optimization (4-8x speedup on alignment)
 
 ### 📋 Planned
 - **Phase 2**: Parallel build, SA compression, streaming input, SIMD acceleration
 - **Phase 3**: Progress reporting, CIGAR accuracy, quality filter improvements
-- **Phase 4**: Integration tests, CAMI benchmark, performance regression tests
+- **Phase 4**: CAMI benchmark, performance regression tests
 - **Phase 5**: Read caching, enhanced statistics, documentation
-- **Phase 6**: NCBI E-utilities integration, local reference cache, batch download
 
 ### 📊 Expand Benchmarks
 - 100+ genomes and eukaryotic genomes

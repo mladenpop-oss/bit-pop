@@ -50,3 +50,7 @@ SRR*.fastq
 
 # Benchmark output / large data files
 *.bitpop
+
+# Private development files
+Plan.txt
+razvoj.md

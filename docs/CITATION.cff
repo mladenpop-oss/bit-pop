@@ -1,0 +1,41 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "Bit-Pop: A Proof-of-Concept Tool for Multi-Genome DNA Read Classification"
+type: software
+version: "0.1.0"
+description: |
+  A multi-genome DNA read classification tool that simultaneously maps
+  sequencing reads against multiple reference genomes and identifies the
+  best matching genome for each read. Combines FM-index-based k-mer filtering,
+  2-bit XOR alignment, and Smith-Waterman refinement.
+authors:
+  - family-names: Popović
+    given-names: Mladen
+    email: mladenpop@gmail.com
+    affiliation: Independent Researcher
+repository-code: "https://github.com/mladenpop-oss/bit-pop"
+license: MIT
+license-url: "https://opensource.org/licenses/MIT"
+keywords:
+  - bioinformatics
+  - genomics
+  - DNA sequencing
+  - read mapping
+  - FM-index
+  - multi-genome
+  - classification
+  - Rust
+programming-language: Rust
+artwork: ""
+date-released: "2026-05-05"
+doi: "10.5281/zenodo.20043594"
+url: "https://github.com/mladenpop-oss/bit-pop"
+abstract: |
+  We present Bit-Pop, a proof-of-concept genomic tool for simultaneous multi-genome
+  DNA read classification. The pipeline combines an FM-index based on radix-sort
+  suffix arrays for efficient k-mer lookup across all indexed genomes, a bit-level
+  2-bit XOR alignment achieving approximately 2.3 ns per 31-base XOR chunk operation, and
+  Smith-Waterman local alignment refinement with Phred-scaled quality-aware scoring.
+  Benchmarked on simulated Illumina-like reads across three distantly related genomes
+  (Escherichia coli, Staphylococcus aureus, and Saccharomyces cerevisiae), Bit-Pop
+  achieves 99.9% classification accuracy on correctly mapped reads.
