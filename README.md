@@ -167,7 +167,7 @@ cargo run --release -- stats -i multi3.bitpop
 | S. cerevisiae | 12.2 Mb | 4,970/5,000 | 99.4% | 100.0% |
 | **Total** | **19.7 Mb** | **19,862/20,000** | **99.3%** | **99.9%** |
 
-**Performance trade-off**: top_n=3 je ~3x sporiji od top_n=1 (2.8s vs 0.9s za E. coli). Preporuka: `--top-n 2` za balans između brzine i tačnosti.
+**Performance trade-off**: top_n=3 is ~3x slower than top_n=1 (2.8s vs 0.9s for E. coli). Recommended: `--top-n 2` for balance between speed and accuracy.
 
 **Throughput**: ~1,500 reads/second (top_n=1)
 
