@@ -396,7 +396,7 @@ Source code available under the MIT License.
 ## Citation
 
 ```
-Popović, M. (2025). Bit-Pop: A Proof-of-Concept Tool for Multi-Genome DNA Read Classification.
+Popović, M. (2026). Bit-Pop: A Proof-of-Concept Tool for Multi-Genome DNA Read Classification.
 ```
 
 ## License
