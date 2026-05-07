@@ -43,7 +43,11 @@ enum Commands {
 #[derive(clap::Args)]
 struct RunArgs {
     /// Genome source: FASTA file, folder of FASTA files, or organism name with --ncbi
-    genome: String,
+    genome: Option<String>,
+
+    /// Use existing .bitpop index file (instead of building from genomes)
+    #[arg(short, long)]
+    index: Option<PathBuf>,
 
     /// Reads file (FASTQ/FASTA) for single-end mode
     #[arg(short, long)]
@@ -108,6 +112,10 @@ struct RunArgs {
     /// Force rebuild index even if cached
     #[arg(long)]
     force: bool,
+
+    /// Number of top rarest k-mers to try as anchors (default: 1)
+    #[arg(long, default_value = "1")]
+    top_n: usize,
 
     /// Use memory-mapped I/O for FASTA file loading (reduces memory usage)
     #[cfg(feature = "mmap")]
@@ -1246,98 +1254,128 @@ async fn cmd_run(args: &RunArgs) -> Result<(), String> {
     println!("Bit-Pop run");
     println!("═══════════");
 
-    // Step 1: Resolve genome source
-    let genome_paths: Vec<PathBuf> = if args.ncbi {
-        println!("\n[1/3] Fetching '{}' from NCBI...", args.genome);
-        let mut config = NcbiConfig::new();
-        if let Some(ref key) = args.api_key {
-            config = config.with_api_key(key.clone());
-        }
-        if let Some(ref email) = args.email {
-            config = config.with_email(email.clone());
-        }
-        let mut client = NcbiClient::new(config);
-        let mut cache = CacheManager::new(None).map_err(|e| e.to_string())?;
+    let use_index = args.index.is_some();
+    let total_steps = if use_index { 2 } else { 3 };
 
-        let accessions = if args.genome.starts_with("NC_") || args.genome.starts_with("AC_") || args.genome.contains('.') {
-            vec![args.genome.clone()]
-        } else {
-            let search_result = client.search(&format!("{}[Organism]", args.genome)).await
-                .map_err(|e| format!("NCBI search failed: {}", e))?;
-            if search_result.idlist.is_empty() {
-                return Err(format!("No genomes found for '{}'", args.genome));
+    // Validate: --index and --ncbi are mutually exclusive
+    if use_index && args.ncbi {
+        return Err("--index and --ncbi cannot be used together".to_string());
+    }
+
+    // Validate: need either --index or genome source
+    if !use_index && args.genome.is_none() {
+        return Err("Either --index or genome path required".to_string());
+    }
+
+    // Step 1: Resolve genome source (only if not using --index)
+    let genome_paths: Vec<PathBuf> = if !use_index {
+        let genome = args.genome.clone().unwrap();
+        if args.ncbi {
+            println!("\n[1/{}] Fetching '{}' from NCBI...", total_steps, genome);
+            let mut config = NcbiConfig::new();
+            if let Some(ref key) = args.api_key {
+                config = config.with_api_key(key.clone());
             }
-            vec![search_result.idlist[0].clone()]
-        };
+            if let Some(ref email) = args.email {
+                config = config.with_email(email.clone());
+            }
+            let mut client = NcbiClient::new(config);
+            let mut cache = CacheManager::new(None).map_err(|e| e.to_string())?;
 
-        let mut paths = Vec::new();
-        for acc in &accessions {
-            print!("  Fetching {}... ", acc);
-            let _fasta = if !args.force && cache.has_sequence(acc) {
-                println!("(cached)");
-                None
+            let accessions = if genome.starts_with("NC_") || genome.starts_with("AC_") || genome.contains('.') {
+                vec![genome.clone()]
             } else {
-                let f = client.fetch_by_accession_version(acc).await
-                    .map_err(|e| format!("Failed to fetch {}: {}", acc, e))?;
-                let parts: Vec<&str> = acc.split('.').collect();
-                let version = if parts.len() >= 2 { parts[1] } else { "1" };
-                let base = if parts.len() >= 2 { parts[0] } else { acc };
-                cache.cache_sequence(acc, version, base, &f)
-                    .map_err(|e| e.to_string())?;
-                println!("({} bases)", f.lines().filter(|l| !l.starts_with('>')).map(|l| l.len()).sum::<usize>() / 2);
-                Some(f)
+                let search_result = client.search(&format!("{}[Organism]", genome)).await
+                    .map_err(|e| format!("NCBI search failed: {}", e))?;
+                if search_result.idlist.is_empty() {
+                    return Err(format!("No genomes found for '{}'", genome));
+                }
+                vec![search_result.idlist[0].clone()]
             };
-            let path = cache.get_fasta_path(acc);
-            paths.push(path);
-        }
-        paths
-    } else {
-        println!("\n[1/3] Resolving genome source...");
-        let path = PathBuf::from(&args.genome);
 
-        if path.is_dir() {
-            let entries: Vec<_> = std::fs::read_dir(&path)
-                .map_err(|e| format!("Cannot read directory {}: {}", path.display(), e))?
-                .filter_map(|e| e.ok())
-                .map(|e| e.path())
-                .filter(|p| {
-                    p.extension().map(|e| e == "fna" || e == "fasta" || e == "fa").unwrap_or(false)
-                })
-                .collect();
-            if entries.is_empty() {
-                return Err(format!("No .fna/.fasta files found in {}", path.display()));
+            let mut paths = Vec::new();
+            for acc in &accessions {
+                print!("  Fetching {}... ", acc);
+                let _fasta = if !args.force && cache.has_sequence(acc) {
+                    println!("(cached)");
+                    None
+                } else {
+                    let f = client.fetch_by_accession_version(acc).await
+                        .map_err(|e| format!("Failed to fetch {}: {}", acc, e))?;
+                    let parts: Vec<&str> = acc.split('.').collect();
+                    let version = if parts.len() >= 2 { parts[1] } else { "1" };
+                    let base = if parts.len() >= 2 { parts[0] } else { acc };
+                    cache.cache_sequence(acc, version, base, &f)
+                        .map_err(|e| e.to_string())?;
+                    println!("({} bases)", f.lines().filter(|l| !l.starts_with('>')).map(|l| l.len()).sum::<usize>() / 2);
+                    Some(f)
+                };
+                let path = cache.get_fasta_path(acc);
+                paths.push(path);
             }
-            println!("  Found {} genome file(s) in {}", entries.len(), path.display());
-            entries
-        } else if path.exists() {
-            println!("  Genome: {}", path.display());
-            vec![path]
+            paths
         } else {
-            return Err(format!("Path '{}' not found", args.genome));
+            println!("\n[1/{}] Resolving genome source...", total_steps);
+            let path = PathBuf::from(&genome);
+
+            if path.is_dir() {
+                let entries: Vec<_> = std::fs::read_dir(&path)
+                    .map_err(|e| format!("Cannot read directory {}: {}", path.display(), e))?
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.path())
+                    .filter(|p| {
+                        p.extension().map(|e| e == "fna" || e == "fasta" || e == "fa").unwrap_or(false)
+                    })
+                    .collect();
+                if entries.is_empty() {
+                    return Err(format!("No .fna/.fasta files found in {}", path.display()));
+                }
+                println!("  Found {} genome file(s) in {}", entries.len(), path.display());
+                entries
+            } else if path.exists() {
+                println!("  Genome: {}", path.display());
+                vec![path]
+            } else {
+                return Err(format!("Path '{}' not found", genome));
+            }
         }
+    } else {
+        Vec::new()
     };
 
-    // Step 2: Build or load index
-    println!("\n[2/3] Preparing index...");
-    #[cfg(feature = "mmap")]
-    let mut bp = if args.mmap {
-        find_or_build_index_mmap(&genome_paths, args.k, args.auto_k, args.force)?
+    // Step 2 (or 1): Build or load index
+    let step_index = if use_index { 1 } else { 2 };
+    println!("\n[{}] Preparing index...", step_index);
+    let mut bp = if let Some(ref index_path) = args.index {
+        println!("  Loading index: {}", index_path.display());
+        BitPop::deserialize_from_file(index_path.to_str().unwrap())
+            .map_err(|e| format!("Failed to load index: {}", e))?
     } else {
+        #[cfg(feature = "mmap")]
+        if args.mmap {
+            find_or_build_index_mmap(&genome_paths, args.k, args.auto_k, args.force)?
+        } else {
+            find_or_build_index(&genome_paths, args.k, args.auto_k, args.force)?
+        }
+        #[cfg(not(feature = "mmap"))]
         find_or_build_index(&genome_paths, args.k, args.auto_k, args.force)?
     };
-    #[cfg(not(feature = "mmap"))]
-    let mut bp = find_or_build_index(&genome_paths, args.k, args.auto_k, args.force)?;
 
     if args.spaced_seed {
         println!("  Spaced seed: enabled (pattern: 11101001110111)");
         bp.set_spaced_seed(true);
     }
 
+    if args.top_n > 1 {
+        bp.set_top_n(args.top_n);
+    }
+
     bp.set_read_type(&args.read_type);
     println!("  Read type: {}", args.read_type);
 
-    // Step 3: Map reads
-    println!("\n[3/3] Mapping reads...");
+    // Step 3 (or 2): Map reads
+    let step_map = if use_index { 2 } else { 3 };
+    println!("\n[{}] Mapping reads...", step_map);
 
     let mapped_count = if let (Some(r1_path), Some(r2_path)) = (&args.reads_1, &args.reads_2) {
         // Paired-end mode
