@@ -1,6 +1,9 @@
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 
+#[cfg(feature = "mmap")]
+use memmap2::Mmap;
+
 /// Reads FASTA files and yields (header, sequence) pairs.
 /// Streaming: does not load entire file into memory at once.
 pub struct FastaReader {
@@ -71,6 +74,102 @@ impl FastaReader {
                 break;
             }
 
+            sequence.push_str(seq_line.trim().to_uppercase().as_str());
+        }
+
+        Some(Ok((header, sequence)))
+    }
+}
+
+/// Memory-mapped FASTA reader for reduced memory footprint.
+/// Uses OS memory mapping instead of buffering the entire file.
+/// Only available when `mmap` feature is enabled.
+#[cfg(feature = "mmap")]
+pub struct MmapFastaReader {
+    mmap: Mmap,
+    position: usize,
+    buffer: String,
+    lookahead: Option<String>,
+}
+
+#[cfg(feature = "mmap")]
+impl MmapFastaReader {
+    /// Create a new MmapFastaReader from a file path.
+    pub fn new(path: &str) -> io::Result<Self> {
+        let file = File::open(path)?;
+        let mmap = unsafe { Mmap::map(&file)? };
+        Ok(Self {
+            mmap,
+            position: 0,
+            buffer: String::new(),
+            lookahead: None,
+        })
+    }
+
+    /// Read the next (header, sequence) pair from the memory-mapped FASTA file.
+    pub fn next(&mut self) -> Option<io::Result<(String, String)>> {
+        let first_line = if let Some(line) = self.lookahead.take() {
+            line
+        } else {
+            loop {
+                self.buffer.clear();
+                let mut found = false;
+                while self.position < self.mmap.len() {
+                    let byte = self.mmap[self.position];
+                    self.position += 1;
+                    if byte == b'\n' {
+                        found = true;
+                        break;
+                    }
+                    self.buffer.push(byte as char);
+                }
+                if !found && self.position >= self.mmap.len() {
+                    let line = self.buffer.trim().to_string();
+                    if line.is_empty() {
+                        return None;
+                    }
+                    return Some(Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "File does not end with newline",
+                    )));
+                }
+                let line = self.buffer.trim().to_string();
+                if line.is_empty() {
+                    continue;
+                }
+                if !line.starts_with('>') {
+                    continue;
+                }
+                break line;
+            }
+        };
+
+        let header = first_line[1..].trim().to_string();
+        let mut sequence = String::new();
+
+        loop {
+            self.buffer.clear();
+            let mut found = false;
+            while self.position < self.mmap.len() {
+                let byte = self.mmap[self.position];
+                self.position += 1;
+                if byte == b'\n' {
+                    found = true;
+                    break;
+                }
+                self.buffer.push(byte as char);
+            }
+            if !found && self.position >= self.mmap.len() {
+                break;
+            }
+            let seq_line = self.buffer.trim();
+            if seq_line.is_empty() {
+                continue;
+            }
+            if seq_line.starts_with('>') {
+                self.lookahead = Some(seq_line.to_string());
+                break;
+            }
             sequence.push_str(seq_line.trim().to_uppercase().as_str());
         }
 
@@ -190,6 +289,85 @@ mod tests {
     fn test_blank_lines_skipped() {
         let file = TempFile::new("\n\n>seq1\n\nACGT\n\nACGT\n\n");
         let mut reader = FastaReader::new(file.path.to_str().unwrap()).unwrap();
+
+        let (_, seq) = reader.next().unwrap().unwrap();
+        assert_eq!(seq, "ACGTACGT");
+    }
+
+    #[test]
+    #[cfg(feature = "mmap")]
+    fn test_mmap_single_fasta() {
+        let file = TempFile::new(">seq1 test sequence\nACGTACGT\n");
+        let mut reader = MmapFastaReader::new(file.path.to_str().unwrap()).unwrap();
+
+        let result = reader.next().unwrap().unwrap();
+        assert_eq!(result.0, "seq1 test sequence");
+        assert_eq!(result.1, "ACGTACGT");
+
+        assert!(reader.next().is_none());
+    }
+
+    #[test]
+    #[cfg(feature = "mmap")]
+    fn test_mmap_multi_fasta() {
+        let file = TempFile::new(">chr1\nACGTACGT\n>chr2\nTTTTGGGG\n");
+        let mut reader = MmapFastaReader::new(file.path.to_str().unwrap()).unwrap();
+
+        let (h1, s1) = reader.next().unwrap().unwrap();
+        assert_eq!(h1, "chr1");
+        assert_eq!(s1, "ACGTACGT");
+
+        let (h2, s2) = reader.next().unwrap().unwrap();
+        assert_eq!(h2, "chr2");
+        assert_eq!(s2, "TTTTGGGG");
+
+        assert!(reader.next().is_none());
+    }
+
+    #[test]
+    #[cfg(feature = "mmap")]
+    fn test_mmap_multiline_sequence() {
+        let file = TempFile::new(">seq1\nACGT\nACGT\nACGT\n");
+        let mut reader = MmapFastaReader::new(file.path.to_str().unwrap()).unwrap();
+
+        let (_, seq) = reader.next().unwrap().unwrap();
+        assert_eq!(seq, "ACGTACGTACGT");
+    }
+
+    #[test]
+    #[cfg(feature = "mmap")]
+    fn test_mmap_lowercase_converted() {
+        let file = TempFile::new(">seq1\nacgtacgt\n");
+        let mut reader = MmapFastaReader::new(file.path.to_str().unwrap()).unwrap();
+
+        let (_, seq) = reader.next().unwrap().unwrap();
+        assert_eq!(seq, "ACGTACGT");
+    }
+
+    #[test]
+    #[cfg(feature = "mmap")]
+    fn test_mmap_empty_file() {
+        let file = TempFile::new("");
+        let mut reader = MmapFastaReader::new(file.path.to_str().unwrap()).unwrap();
+        assert!(reader.next().is_none());
+    }
+
+    #[test]
+    #[cfg(feature = "mmap")]
+    fn test_mmap_header_only() {
+        let file = TempFile::new(">seq1\n");
+        let mut reader = MmapFastaReader::new(file.path.to_str().unwrap()).unwrap();
+
+        let (header, seq) = reader.next().unwrap().unwrap();
+        assert_eq!(header, "seq1");
+        assert_eq!(seq, "");
+    }
+
+    #[test]
+    #[cfg(feature = "mmap")]
+    fn test_mmap_blank_lines_skipped() {
+        let file = TempFile::new("\n\n>seq1\n\nACGT\n\nACGT\n\n");
+        let mut reader = MmapFastaReader::new(file.path.to_str().unwrap()).unwrap();
 
         let (_, seq) = reader.next().unwrap().unwrap();
         assert_eq!(seq, "ACGTACGT");

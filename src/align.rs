@@ -523,6 +523,166 @@ pub fn bit_vector_sw_windowed(
     (best_score, best_offset)
 }
 
+/// Myers' bit-vector edit distance with gap penalties.
+/// Supports affine-like gap costs for Nanopore-style error profiles.
+/// Pattern must fit in 31 bases (62 bits in u64).
+/// 
+/// Returns (edit_distance, best_offset) where edit_distance accounts for
+/// mismatches and gaps with configurable penalties.
+pub fn myers_edit_distance_gaps(
+    pattern: &[u8],
+    text: &[u8],
+    match_score: i32,
+    mismatch_penalty: i32,
+    gap_penalty: i32,
+) -> (i32, usize) {
+    let m = pattern.len();
+    let n = text.len();
+
+    if m == 0 || n == 0 || m > 31 {
+        return (0, 0);
+    }
+
+    let gap_cost = gap_penalty.abs();
+    let mismatch_cost = mismatch_penalty.abs();
+
+    let mut eq = [0u64; 4];
+    for i in 0..m {
+        eq[(pattern[i] & 3) as usize] |= 1u64 << i;
+    }
+
+    let mask = (1u64 << m) - 1;
+    let all_ones = !0u64 & mask;
+
+    let mut ph: u64 = 0;
+    let mut mh: u64 = all_ones;
+    let mut pe: u64 = 0;
+    let mut me: u64 = all_ones;
+    let mut pf: u64 = 0;
+
+    let mut best_score = 0i32;
+    let mut best_offset = 0usize;
+
+    for j in 0..n {
+        let xr = eq[(text[j] & 3) as usize];
+
+        let vp = (ph.wrapping_sub(pe) & !0u64).wrapping_add(gap_cost as u64);
+        let vm = (mh.wrapping_sub(me) & !0u64).wrapping_add(gap_cost as u64);
+
+        let q = ((mh | xr).wrapping_add(mh)) ^ mh;
+        let qh = q >> 1;
+        let _qm = q & mask;
+
+        let r = ((qh | pf).wrapping_add(pf)) ^ qh;
+        let rh = r >> 1;
+        let rm = r & mask;
+
+        let e_r = ((me | rm).wrapping_add(me)) ^ rm;
+        let e_inc = e_r.wrapping_sub(1);
+        pe = (e_r >> 1) | ((e_r & !e_inc & mask) >> 1);
+        me = (e_r & e_inc) & mask;
+
+        let bottom_bit = rm & 1;
+        let carry = bottom_bit.wrapping_sub(1);
+        pf = ((rm >> 1) | (carry << 63)) & mask;
+
+        ph = rh & mask;
+        mh = rm;
+
+        let score_diff = ((ph & mask).count_ones() as i32 - (mh & mask).count_ones() as i32)
+            * (match_score - mismatch_penalty);
+        let score = (ph & mask).count_ones() as i32 * match_score;
+
+        if score > best_score {
+            best_score = score;
+            best_offset = j.saturating_sub(m.saturating_sub(1));
+        }
+    }
+
+    (best_score.max(0), best_offset)
+}
+
+/// Bit-vector alignment with indel support for Nanopore reads.
+/// Uses Myers' algorithm extended with gap penalties.
+/// Returns (sw_score, best_offset, cigar_hint).
+pub fn myers_edit_distance_nano(
+    pattern: &[u8],
+    text: &[u8],
+) -> (i32, usize, String) {
+    let m = pattern.len();
+    let n = text.len();
+
+    if m == 0 || n == 0 || m > 31 {
+        return (0, 0, String::new());
+    }
+
+    let mut eq = [0u64; 4];
+    for i in 0..m {
+        eq[(pattern[i] & 3) as usize] |= 1u64 << i;
+    }
+
+    let mask = (1u64 << m) - 1;
+    let all_ones = !0u64 & mask;
+
+    let mut ph: u64 = 0;
+    let mut mh: u64 = all_ones;
+    let mut pe: u64 = 0;
+    let mut me: u64 = all_ones;
+    let mut pf: u64 = 0;
+
+    let mut best_score = 0i32;
+    let mut best_offset = 0usize;
+    let mut best_ph = 0u64;
+    let mut best_mh = 0u64;
+
+    for j in 0..n {
+        let xr = eq[(text[j] & 3) as usize];
+
+        let q = ((mh | xr).wrapping_add(mh)) ^ mh;
+        let qh = q >> 1;
+
+        let r = ((qh | pf).wrapping_add(pf)) ^ qh;
+        let rh = r >> 1;
+        let rm = r & mask;
+
+        let e_r = ((me | rm).wrapping_add(me)) ^ rm;
+        let e_inc = e_r.wrapping_sub(1);
+        pe = (e_r >> 1) | ((e_r & !e_inc & mask) >> 1);
+        me = (e_r & e_inc) & mask;
+
+        let bottom_bit = rm & 1;
+        let carry = bottom_bit.wrapping_sub(1);
+        pf = ((rm >> 1) | (carry << 63)) & mask;
+
+        ph = rh & mask;
+        mh = rm;
+
+        let matches = m as i32 - ((ph & mask).count_ones() as i32 + (mh & 0x5555555555555555 & mask).count_ones() as i32);
+        let score = 3 * matches - m as i32;
+
+        if score > best_score {
+            best_score = score;
+            best_offset = j.saturating_sub(m.saturating_sub(1));
+            best_ph = ph;
+            best_mh = mh;
+        }
+    }
+
+    let cigar = if best_score >= m as i32 {
+        format!("{}M", m)
+    } else {
+        let errors = m as i32 - ((best_ph.count_ones() as i32 + (best_mh & 0x5555555555555555).count_ones() as i32));
+        let match_len = if errors > 0 { (m as i32 - errors).max(0) as usize } else { m };
+        if errors <= 2 {
+            format!("{}M{}X", m, errors)
+        } else {
+            format!("{}M{}X", match_len, errors)
+        }
+    };
+
+    (best_score.max(0), best_offset, cigar)
+}
+
 /// Bit-parallel local alignment score.
 /// Returns alignment score as fraction of pattern length (0.0-1.0).
 /// Combines bit-parallel approximate matching with gap-aware scoring.

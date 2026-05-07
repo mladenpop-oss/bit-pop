@@ -21,6 +21,10 @@ dirs = "6"
 chrono = { version = "0.4", features = ["serde"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 thiserror = "2"
+indicatif = "0.17"
+
+[features]
+mmap = []
 
 [dev-dependencies]
 criterion = "0.5"

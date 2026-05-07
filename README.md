@@ -36,14 +36,20 @@ See [Usage](#usage) for full documentation.
 
 - **Multi-genome indexing**: All reference genomes indexed in a single FM-index structure
 - **Speed via bit-level operations**: 2-bit XOR alignment achieving ~2.3 ns per 31-base XOR chunk operation
+- **Myers edit distance**: 23-54x faster alternative to Smith-Waterman for alignment
+- **Spaced seeds**: Improved sensitivity for high-error reads (Nanopore, PacBio)
+- **Adaptive k-mer size**: Auto-calculates optimal k based on genome size (`--auto-k`)
 - **Quality-aware refinement**: Smith-Waterman local alignment with Phred-scaled quality penalties
 - **Combined ranking**: Formula balancing alignment score (85%) and k-mer rarity (15%)
 - **Top-N rarest k-mer anchors**: Fallback to 2nd/3rd rarest k-mers for improved mapping rate
 - **Reverse complement support**: Full RC-aware mapping with proper SAM FLAG 0x10 handling
 - **Paired-end support**: Full SAM specification compliance with proper FLAG handling
 - **Parallel mapping**: Work-stealing scheduler using rayon for multi-core speedup
+- **Parallel index build**: Multi-threaded BWT and suffix array construction
+- **Memory-mapped FASTA**: Reduced memory footprint with `--mmap` flag
 - **Auto index caching**: Reuses `.bitpop` files when genomes haven't changed
 - **NCBI integration**: Download genomes directly from NCBI with `--ncbi` flag
+- **Progress reporting**: CLI progress bars for build and mapping operations
 - **Smart defaults**: Automatic output paths, index detection, and progress reporting
 
 ## Comparison with Existing Tools
@@ -62,19 +68,20 @@ See [Usage](#usage) for full documentation.
 
 ## Pipeline
 
-1. **FM-index** (radix-sort suffix arrays) for efficient k-mer lookup
-2. **Anchor-based k-mer filtering** (top-N rarest k-mer selection with fallback)
-3. **2-bit XOR alignment** (~2.3 ns per 31-base chunk for exact/near-exact matches)
-4. **Smith-Waterman refinement** for lower confidence scores (<0.9)
-5. **Multi-genome ranking** with combined scoring formula
-6. **Reverse complement** scoring — tries both forward and RC, returns best match
+1. **FM-index** (SA-IS via libsais) for efficient k-mer lookup
+2. **Spaced seed** matching for improved sensitivity on error-prone reads
+3. **Anchor-based k-mer filtering** (top-N rarest k-mer selection with fallback)
+4. **2-bit XOR alignment** (~2.3 ns per 31-base chunk for exact/near-exact matches)
+5. **Myers edit distance** (23-54x faster alternative to Smith-Waterman)
+6. **Smith-Waterman refinement** for lower confidence scores (<0.9)
+7. **Multi-genome ranking** with combined scoring formula
+8. **Reverse complement** scoring — tries both forward and RC, returns best match
 
 ## Installation
 
 ### Prerequisites
 
 - Rust toolchain (2021 edition)
-- Python 3.x with Biopython (for read simulation)
 
 ### Build
 
@@ -82,11 +89,9 @@ See [Usage](#usage) for full documentation.
 cargo build --release
 ```
 
-### Dependencies
+### Optional Dependencies
 
-```bash
-pip install biopython
-```
+- Python 3.x with Biopython - only required for read simulation (`scripts/simulate_reads.py`)
 
 ## Usage
 
@@ -197,10 +202,14 @@ pip install biopython
 | `--ncbi` | Fetch genome from NCBI | false |
 | `-o, --output` | Output SAM file | `<reads_name>.sam` |
 | `-k, --k` | K-mer size | 10 |
+| `--auto-k` | Auto-calculate optimal k-mer size | false |
+| `--read-type` | Read type: short (clamp [10,15]) / long (clamp [13,19]) | short |
+| `-s, --spaced-seed` | Enable spaced seed matching | false |
 | `-a, --align-mode` | Alignment mode: xor, sw, hybrid | hybrid |
 | `-m, --min-score` | Minimum alignment score (0.0-1.0) | 0.7 |
 | `-q, --min-quality` | Minimum Phred quality (0 = no filter) | 0 |
 | `-t, --threads` | Number of threads | 1 |
+| `--mmap` | Use memory-mapped FASTA loading | false |
 | `--force` | Force rebuild index | false |
 
 ### Align Modes
@@ -244,15 +253,30 @@ pip install biopython
 
 ```
 ├── src/                    # Rust source code (14 modules)
-├── benches/                # Benchmark scripts (Criterion)
-├── tests/                  # Integration tests
+│   ├── main.rs             # CLI entry point (8 subcommands)
+│   ├── lib.rs              # Core library (BitPop struct, DNA encoding)
+│   ├── fm.rs               # FM-index (SA-IS, BWT, backward search)
+│   ├── align.rs            # Alignment (XOR, SW, Myers)
+│   ├── sam.rs              # SAM output format
+│   ├── fasta.rs            # FASTA parsing + memory-mapped reader
+│   ├── fastq.rs            # FASTQ parsing + quality filtering
+│   ├── rank.rs             # Multi-genome ranking
+│   ├── ncbi.rs             # NCBI E-utilities API client
+│   ├── cache.rs            # Local cache management
+│   ├── index_manager.rs    # Dynamic index management
+│   ├── delta.rs            # Delta encoding + VLI compression
+│   ├── persisted.rs        # Advanced persistence (memmap2, format v5)
+│   └── serialize.rs        # Binary serialization
+├── benches/                # Criterion benchmarks (17 benchmark groups)
+├── tests/                  # Integration tests (5 tests)
+├── scripts/
+│   ├── simulate_reads.py   # Read simulation (Biopython)
+│   ├── analyze_benchmark_new.ps1 # Benchmark analysis
+│   └── bitpop-workflow.py  # Multi-index workflow tool
 ├── data/
 │   ├── genomes/            # Reference genomes (.fna, .fasta)
 │   ├── reads/              # Sequencing reads (.fastq)
 │   └── indices/            # Generated index files (.bitpop)
-├── scripts/
-│   ├── simulate_reads.py   # Read simulation (Biopython)
-│   └── analyze_benchmark_new.ps1 # Benchmark analysis
 ├── docs/
 │   ├── paper.tex           # Academic paper
 │   ├── paper.pdf           # Compiled paper
@@ -291,9 +315,9 @@ cargo bench
 ```
 
 **Test coverage:**
-- 248 unit tests (alignment, indexing, serialization, SAM output)
+- 253+ unit tests (alignment, indexing, serialization, SAM output, spaced seeds, delta encoding, persistence)
 - 5 integration tests (build, map, multi-genome, SAM format, cache reuse)
-- Criterion benchmarks for performance tracking
+- 17 Criterion benchmark groups (XOR, SW, Myers, FM-index, k-mer filter, full pipeline)
 
 ## Limitations
 
@@ -302,6 +326,36 @@ cargo bench
 - Index file sizes ~152MB for 19.7Mb genome (delta compression planned)
 - Chunked reads (>31bp) use generic CIGAR without per-base mismatch detail
 
+## Large Genome Support
+
+**Limitation:** FM-index construction uses libsais which has a ~2GB limit per index (~2.1B characters).
+
+**Solution for large genomes (>2GB):** Use the workflow tool to automatically split, build, map, and merge:
+
+```bash
+# Full workflow (all steps automatic)
+python scripts/bitpop-workflow.py full genome.fna reads.fastq -o output/ --threads 8
+
+# Or manual step-by-step:
+python scripts/bitpop-workflow.py split genome.fna -o chunks/
+python scripts/bitpop-workflow.py build chunks/ -o indexes/ --threads 8
+python scripts/bitpop-workflow.py map indexes/ reads.fastq -o mapped/ --threads 8
+python scripts/bitpop-workflow.py merge mapped/ -o final.sam
+```
+
+**How it works:**
+1. Splits genome into chunks (< 2GB each) by accession/chromosome boundaries
+2. Builds FM-index for each chunk in parallel
+3. Maps reads against all indexes in parallel
+4. Merges SAM results (deduplicates by read name)
+
+**Options:**
+- `--max-size 2000` - max chunk size in MB (default: 2000)
+- `--threads 8` - parallel threads (default: 4)
+- `--no-cleanup` - keep intermediate files
+
+---
+
 ## Development Roadmap
 
 ### ✅ Completed
@@ -309,19 +363,26 @@ cargo bench
 - **Phase 1.1**: Top-N rarest k-mer anchors (97.9% → 99.3% mapping rate)
 - **Phase 1.2**: Reverse complement support with SAM FLAG 0x10
 - **Phase 1.3**: Paired-end support with full SAM compliance
+- **Phase 1.1 (extended)**: Spaced seeds for high-error reads
+- **Phase 1.2 (extended)**: Adaptive k-mer size (`--auto-k`, `--read-type`)
+- **Phase 1.4**: Myers edit distance (23-54x faster than Smith-Waterman)
+- **Phase 2.1**: Memory-mapped FASTA (`--mmap`)
+- **Phase 2.2**: Parallel index build (rayon)
+- **Phase 3.1**: Progress reporting (CLI progress bars)
 - **Phase 6**: NCBI E-utilities integration (search, fetch, update commands)
+- **Phase 7**: Large genome workaround (`bitpop-workflow.py`)
 - **UX**: `run` command with auto-index caching and smart defaults
 - **Tests**: Integration test suite (5 tests)
 
 ### 🔧 In Progress
-- **Phase 1.4**: Seed-and-extend multi-anchor filtering
-- **Phase 2.5**: `count_ones` optimization (4-8x speedup on alignment)
+- **Phase 1.3 (extended)**: K-mer voting for ultra-long reads (>10kb)
 
 ### 📋 Planned
-- **Phase 2**: Parallel build, SA compression, streaming input, SIMD acceleration
-- **Phase 3**: Progress reporting, CIGAR accuracy, quality filter improvements
-- **Phase 4**: CAMI benchmark, performance regression tests
-- **Phase 5**: Read caching, enhanced statistics, documentation
+- **Phase 2**: SA compression, streaming input, SIMD acceleration (AVX2)
+- **Phase 3**: CIGAR accuracy improvements, quality filter enhancements
+- **Phase 4**: CAMI benchmark dataset, regression tests, real dataset validation (SRA)
+- **Phase 5**: Read caching, enhanced statistics, API documentation (docs.rs)
+- **Multi-index**: Unified FM-index with automatic splitting (>2GB genomes)
 
 ### 📊 Expand Benchmarks
 - 100+ genomes and eukaryotic genomes

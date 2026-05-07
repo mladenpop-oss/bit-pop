@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
+use indicatif::{ProgressBar, ProgressStyle};
 
 use bit_pop::{BitPop, AlignMode};
 use bit_pop::fastq::{parse_reads, ReadsFormat};
@@ -68,6 +69,18 @@ struct RunArgs {
     #[arg(short, long, default_value = "10")]
     k: usize,
 
+    /// Auto-scale k-mer size based on genome size
+    #[arg(long)]
+    auto_k: bool,
+
+    /// Use spaced seed pattern for k-mer matching (better for high-error long reads)
+    #[arg(short = 's', long)]
+    spaced_seed: bool,
+
+    /// Read type: short (Illumina, k=10) or long (Nanopore/PacBio, auto k)
+    #[arg(long, default_value = "short")]
+    read_type: String,
+
     /// Alignment mode: xor (fast), sw (accurate), hybrid (balanced)
     #[arg(short, long, default_value = "hybrid")]
     align_mode: String,
@@ -95,6 +108,11 @@ struct RunArgs {
     /// Force rebuild index even if cached
     #[arg(long)]
     force: bool,
+
+    /// Use memory-mapped I/O for FASTA file loading (reduces memory usage)
+    #[cfg(feature = "mmap")]
+    #[arg(long)]
+    mmap: bool,
 }
 
 #[derive(clap::Args)]
@@ -111,9 +129,22 @@ struct BuildArgs {
     #[arg(short, long, default_value = "8")]
     k: usize,
 
+    /// Auto-scale k-mer size based on genome size
+    #[arg(long)]
+    auto_k: bool,
+
+    /// Read type: short (Illumina, k=10) or long (Nanopore/PacBio, auto k)
+    #[arg(long, default_value = "short")]
+    read_type: String,
+
     /// Number of threads
     #[arg(short, long, default_value = "1")]
     threads: usize,
+
+    /// Use memory-mapped I/O for FASTA file loading (reduces memory usage)
+    #[cfg(feature = "mmap")]
+    #[arg(long)]
+    mmap: bool,
 }
 
 #[derive(clap::Args)]
@@ -172,6 +203,15 @@ struct LoadArgs {
     /// Updated index output path
     #[arg(short, long, required = true)]
     output: PathBuf,
+
+    /// Use memory-mapped I/O for FASTA file loading (reduces memory usage)
+    #[cfg(feature = "mmap")]
+    #[arg(long)]
+    mmap: bool,
+
+    /// Number of threads for parallel index build
+    #[arg(short, long, default_value = "1")]
+    threads: usize,
 }
 
 #[derive(clap::Args)]
@@ -217,6 +257,10 @@ struct FetchArgs {
     /// K-mer size
     #[arg(short, long, default_value = "10")]
     k: usize,
+
+    /// Auto-scale k-mer size based on genome size
+    #[arg(long)]
+    auto_k: bool,
 
     /// Output FASTA file instead of building index
     #[arg(short, long)]
@@ -291,17 +335,31 @@ fn cmd_build(args: &BuildArgs, verbose: bool) {
     println!("Building FM-Index...");
 
     let mut bp = BitPop::new(args.k);
+    bp.set_auto_k(args.auto_k);
+    bp.set_read_type(&args.read_type);
     let mut total_bases: usize = 0;
+
+    let pb = ProgressBar::new(args.fasta.len() as u64);
+    pb.set_style(ProgressStyle::default_bar()
+        .template("{spinner} {msg}: [{elapsed_precise} {bar:40} {pos}/{len}]")
+        .unwrap());
 
     for fasta_path in &args.fasta {
         let path_str = fasta_path.to_string_lossy().to_string();
-        if verbose {
-            println!("  Loading: {}", path_str);
-        }
+        pb.set_message(format!("Loading: {}", path_str));
 
-        match bp.load_genome_fasta(&path_str) {
-            Ok(ids) => {
-                for gid in ids {
+        #[cfg(feature = "mmap")]
+        let ids = if args.mmap {
+            bp.load_genome_fasta_mmap(&path_str)
+        } else {
+            bp.load_genome_fasta(&path_str)
+        };
+        #[cfg(not(feature = "mmap"))]
+        let ids = bp.load_genome_fasta(&path_str);
+
+        match ids {
+            Ok(gids) => {
+                for gid in gids {
                     let seq_len = bp.genome_seq_len(gid).unwrap_or(0);
                     total_bases += seq_len;
                     if verbose {
@@ -312,17 +370,27 @@ fn cmd_build(args: &BuildArgs, verbose: bool) {
                 }
             }
             Err(e) => {
+                pb.finish_with_message(format!("Error loading {}: {}", path_str, e));
                 eprintln!("Error loading {}: {}", path_str, e);
                 std::process::exit(1);
             }
         }
+        pb.inc(1);
     }
+    pb.finish_with_message("Genomes loaded");
 
     if verbose {
         println!("Building index...");
     }
     let build_start = Instant::now();
-    bp.build();
+    if args.threads > 1 {
+        if verbose {
+            println!("  Using {} threads for parallel build", args.threads);
+        }
+        bp.build_parallel();
+    } else {
+        bp.build();
+    }
     let build_time = build_start.elapsed();
 
     if verbose {
@@ -436,7 +504,7 @@ fn cmd_map(args: &MapArgs, verbose: bool) {
 
     let map_start = Instant::now();
 
-    let mapped_count = if has_quality && args.min_quality > 0 {
+      let mapped_count = if has_quality && args.min_quality > 0 {
         match &reads_format {
             ReadsFormat::Fastq(reads) => {
                 let genomes_owned: Vec<(String, usize)> = (0..bp.genome_count() as u32)
@@ -451,13 +519,26 @@ fn cmd_map(args: &MapArgs, verbose: bool) {
                     .map(|(n, l)| (n.as_str(), *l)).collect();
 
                 let name_refs: Vec<&str> = genome_name_refs.clone();
+                let total = reads.len();
+
+                let pb = ProgressBar::new(total as u64);
+                pb.set_style(ProgressStyle::default_bar()
+                    .template("{spinner} Mapping reads: [{elapsed_precise} {bar:40} {pos}/{len}] {msg}")
+                    .unwrap());
 
                 let mapped: Vec<(String, String, Vec<bit_pop::QualityMappingResult>)> = reads.iter()
-                    .map(|(name, seq, qual)| {
+                    .enumerate()
+                    .map(|(i, (name, seq, qual))| {
                         let results = bp.map_read_with_quality_mode(seq, qual, align_mode, args.min_quality, 50);
+                        if (i + 1) % 10 == 0 || i + 1 == total {
+                            pb.set_position((i + 1) as u64);
+                            pb.set_message(format!("{}/{} reads", i + 1, total));
+                        }
                         (name.clone(), seq.clone(), results)
                     })
                     .collect();
+
+                pb.finish_with_message("Mapping complete");
 
                 let mut writer = bit_pop::sam::SamWriter::new(args.output.to_str().unwrap()).unwrap();
                 writer.write_header(&genome_header).unwrap();
@@ -476,10 +557,48 @@ fn cmd_map(args: &MapArgs, verbose: bool) {
                 let reads_refs: Vec<(&str, &str)> = filtered_reads_fasta.iter()
                     .map(|(name, seq)| (name.as_str(), seq.as_str()))
                     .collect();
+                let total = reads_refs.len();
+
                 if args.reads_threads > 1 {
-                    bp.map_reads_parallel(&reads_refs, args.output.to_str().unwrap(), 50).unwrap_or(0)
+                    let pb = ProgressBar::new(total as u64);
+                    pb.set_style(ProgressStyle::default_bar()
+                        .template("{spinner} Mapping reads: [{elapsed_precise} {bar:40} {pos}/{len}] {msg}")
+                        .unwrap());
+                    let pb_clone = pb.clone();
+
+                    let result = bp.map_reads_parallel_with_progress(
+                        &reads_refs,
+                        args.output.to_str().unwrap(),
+                        50,
+                        if total > 1000 { 100 } else { 10 },
+                        move |completed, total| {
+                            pb_clone.set_position(completed as u64);
+                            pb_clone.set_message(format!("{}/{} reads", completed, total));
+                        },
+                    ).unwrap_or(0);
+
+                    pb.finish_with_message("Mapping complete");
+                    result
                 } else {
-                    bp.map_reads_to_sam(&reads_refs, args.output.to_str().unwrap(), 50).unwrap_or(0)
+                    let pb = ProgressBar::new(total as u64);
+                    pb.set_style(ProgressStyle::default_bar()
+                        .template("{spinner} Mapping reads: [{elapsed_precise} {bar:40} {pos}/{len}] {msg}")
+                        .unwrap());
+                    let pb_clone = pb.clone();
+
+                    let result = bp.map_reads_to_sam_with_progress(
+                        &reads_refs,
+                        args.output.to_str().unwrap(),
+                        50,
+                        if total > 1000 { 100 } else { 10 },
+                        move |completed, total| {
+                            pb_clone.set_position(completed as u64);
+                            pb_clone.set_message(format!("{}/{} reads", completed, total));
+                        },
+                    ).unwrap_or(0);
+
+                    pb.finish_with_message("Mapping complete");
+                    result
                 }
             }
         }
@@ -487,14 +606,52 @@ fn cmd_map(args: &MapArgs, verbose: bool) {
         let reads_refs: Vec<(&str, &str)> = filtered_reads_fasta.iter()
             .map(|(name, seq)| (name.as_str(), seq.as_str()))
             .collect();
-        bp.map_reads_parallel(&reads_refs, args.output.to_str().unwrap(), 50)
-            .unwrap_or(0)
+        let total = reads_refs.len();
+
+        let pb = ProgressBar::new(total as u64);
+        pb.set_style(ProgressStyle::default_bar()
+            .template("{spinner} Mapping reads: [{elapsed_precise} {bar:40} {pos}/{len}] {msg}")
+            .unwrap());
+        let pb_clone = pb.clone();
+
+        let result = bp.map_reads_parallel_with_progress(
+            &reads_refs,
+            args.output.to_str().unwrap(),
+            50,
+            if total > 1000 { 100 } else { 10 },
+            move |completed, total| {
+                pb_clone.set_position(completed as u64);
+                pb_clone.set_message(format!("{}/{} reads", completed, total));
+            },
+        ).unwrap_or(0);
+
+        pb.finish_with_message("Mapping complete");
+        result
     } else {
         let reads_refs: Vec<(&str, &str)> = filtered_reads_fasta.iter()
             .map(|(name, seq)| (name.as_str(), seq.as_str()))
             .collect();
-        bp.map_reads_to_sam(&reads_refs, args.output.to_str().unwrap(), 50)
-            .unwrap_or(0)
+        let total = reads_refs.len();
+
+        let pb = ProgressBar::new(total as u64);
+        pb.set_style(ProgressStyle::default_bar()
+            .template("{spinner} Mapping reads: [{elapsed_precise} {bar:40} {pos}/{len}] {msg}")
+            .unwrap());
+        let pb_clone = pb.clone();
+
+        let result = bp.map_reads_to_sam_with_progress(
+            &reads_refs,
+            args.output.to_str().unwrap(),
+            50,
+            if total > 1000 { 100 } else { 10 },
+            move |completed, total| {
+                pb_clone.set_position(completed as u64);
+                pb_clone.set_message(format!("{}/{} reads", completed, total));
+            },
+        ).unwrap_or(0);
+
+        pb.finish_with_message("Mapping complete");
+        result
     };
 
     let elapsed = start.elapsed();
@@ -523,19 +680,35 @@ fn cmd_map_paired(bp: &BitPop, r1_path: &Path, r2_path: &Path, output: &Path, mi
 
     println!("Loaded {} read pairs", pairs.len());
 
+    let total_pairs = pairs.len();
+    let pb = ProgressBar::new(total_pairs as u64);
+    pb.set_style(ProgressStyle::default_bar()
+        .template("{spinner} Mapping pairs: [{elapsed_precise} {bar:40} {pos}/{len}] {msg}")
+        .unwrap());
+
     let mapped_count = if min_quality > 0 {
-        bp.map_paired_reads_parallel_quality(
+        let result = bp.map_paired_reads_parallel_quality(
             &pairs,
             output.to_str().unwrap(),
             min_quality,
             50,
-        ).unwrap_or(0)
+        ).unwrap_or(0);
+
+        pb.set_position(total_pairs as u64);
+        pb.set_message(format!("{} pairs", total_pairs));
+        pb.finish_with_message("Mapping complete");
+        result
     } else {
-        bp.map_paired_reads_parallel(
+        let result = bp.map_paired_reads_parallel(
             &pairs,
             output.to_str().unwrap(),
             50,
-        ).unwrap_or(0)
+        ).unwrap_or(0);
+
+        pb.set_position(total_pairs as u64);
+        pb.set_message(format!("{} pairs", total_pairs));
+        pb.finish_with_message("Mapping complete");
+        result
     };
 
     let elapsed = map_start.elapsed();
@@ -564,9 +737,18 @@ fn cmd_load(args: &LoadArgs, verbose: bool) {
         if verbose {
             println!("  Adding: {}", path_str);
         }
-        match bp.load_genome_fasta(&path_str) {
-            Ok(ids) => {
-                for gid in ids {
+        #[cfg(feature = "mmap")]
+        let ids = if args.mmap {
+            bp.load_genome_fasta_mmap(&path_str)
+        } else {
+            bp.load_genome_fasta(&path_str)
+        };
+        #[cfg(not(feature = "mmap"))]
+        let ids = bp.load_genome_fasta(&path_str);
+
+        match ids {
+            Ok(gids) => {
+                for gid in gids {
                     if verbose {
                         if let Some(name) = bp.genome_name(gid) {
                             println!("    Added: {}", name);
@@ -587,7 +769,14 @@ fn cmd_load(args: &LoadArgs, verbose: bool) {
     if verbose {
         println!("Rebuilding index...");
     }
-    bp.build();
+    if args.threads > 1 {
+        if verbose {
+            println!("  Using {} threads for parallel build", args.threads);
+        }
+        bp.build_parallel();
+    } else {
+        bp.build();
+    }
 
     match bp.serialize_to_file(args.output.to_str().unwrap()) {
         Ok(_) => {
@@ -798,6 +987,7 @@ async fn cmd_fetch(args: &FetchArgs, verbose: bool) -> Result<(), String> {
         let build_start = Instant::now();
 
         let mut bp = BitPop::new(args.k);
+        bp.set_auto_k(args.auto_k);
         for (name, seq) in &genomes {
             bp.add_genome(name, seq);
         }
@@ -930,7 +1120,7 @@ fn default_output_path(reads_path: &Path) -> PathBuf {
     parent.join(format!("{}.sam", name))
 }
 
-fn find_or_build_index(genome_paths: &[PathBuf], k: usize, force: bool) -> Result<BitPop, String> {
+fn find_or_build_index(genome_paths: &[PathBuf], k: usize, auto_k: bool, force: bool) -> Result<BitPop, String> {
     if genome_paths.is_empty() {
         return Err("No genome files provided".to_string());
     }
@@ -965,9 +1155,71 @@ fn find_or_build_index(genome_paths: &[PathBuf], k: usize, force: bool) -> Resul
     let build_start = Instant::now();
 
     let mut bp = BitPop::new(k);
+    bp.set_auto_k(auto_k);
     for path in genome_paths {
         let path_str = path.to_string_lossy();
         let ids = bp.load_genome_fasta(&path_str)
+            .map_err(|e| format!("Failed to load {}: {}", path.display(), e))?;
+        if let Some(name) = ids.first().and_then(|&gid| bp.genome_name(gid)) {
+            let seq_len = bp.genome_seq_len(ids[0]).unwrap_or(0);
+            println!("    Loaded: {} ({} bases)", name, seq_len);
+        }
+    }
+
+    bp.build();
+    let build_time = build_start.elapsed();
+    println!("  Index built in {:.2}s", build_time.as_secs_f64());
+
+    if genome_paths.len() == 1 {
+        let index_path = genome_paths[0].with_extension("bitpop");
+        if let Err(e) = bp.serialize_to_file(index_path.to_str().unwrap()) {
+            eprintln!("  Warning: failed to cache index: {}", e);
+        }
+    }
+
+    Ok(bp)
+}
+
+#[cfg(feature = "mmap")]
+fn find_or_build_index_mmap(genome_paths: &[PathBuf], k: usize, auto_k: bool, force: bool) -> Result<BitPop, String> {
+    if genome_paths.is_empty() {
+        return Err("No genome files provided".to_string());
+    }
+
+    if genome_paths.len() == 1 {
+        let genome_path = &genome_paths[0];
+        let index_path = genome_path.with_extension("bitpop");
+
+        if !force && index_path.exists() {
+            let genome_hash = sha256_file(genome_path)?;
+            let meta = std::fs::metadata(&index_path).map_err(|e| e.to_string())?;
+            let index_mtime = meta.modified().map_err(|e| e.to_string())?;
+            let genome_mtime = std::fs::metadata(genome_path).map_err(|e| e.to_string())?.modified().map_err(|e| e.to_string())?;
+
+            if genome_mtime <= index_mtime {
+                println!("  Using cached index: {}", index_path.display());
+                match BitPop::deserialize_from_file(index_path.to_str().unwrap()) {
+                    Ok(bp) => {
+                        if bp.genome_count() > 0 {
+                            return Ok(bp);
+                        }
+                    }
+                    Err(_) => {
+                        println!("  Cache corrupted, rebuilding...");
+                    }
+                }
+            }
+        }
+    }
+
+    println!("  Building index (mmap, {} genomes, k={})...", genome_paths.len(), k);
+    let build_start = Instant::now();
+
+    let mut bp = BitPop::new(k);
+    bp.set_auto_k(auto_k);
+    for path in genome_paths {
+        let path_str = path.to_string_lossy();
+        let ids = bp.load_genome_fasta_mmap(&path_str)
             .map_err(|e| format!("Failed to load {}: {}", path.display(), e))?;
         if let Some(name) = ids.first().and_then(|&gid| bp.genome_name(gid)) {
             let seq_len = bp.genome_seq_len(ids[0]).unwrap_or(0);
@@ -1067,7 +1319,22 @@ async fn cmd_run(args: &RunArgs) -> Result<(), String> {
 
     // Step 2: Build or load index
     println!("\n[2/3] Preparing index...");
-    let bp = find_or_build_index(&genome_paths, args.k, args.force)?;
+    #[cfg(feature = "mmap")]
+    let mut bp = if args.mmap {
+        find_or_build_index_mmap(&genome_paths, args.k, args.auto_k, args.force)?
+    } else {
+        find_or_build_index(&genome_paths, args.k, args.auto_k, args.force)?
+    };
+    #[cfg(not(feature = "mmap"))]
+    let mut bp = find_or_build_index(&genome_paths, args.k, args.auto_k, args.force)?;
+
+    if args.spaced_seed {
+        println!("  Spaced seed: enabled (pattern: 11101001110111)");
+        bp.set_spaced_seed(true);
+    }
+
+    bp.set_read_type(&args.read_type);
+    println!("  Read type: {}", args.read_type);
 
     // Step 3: Map reads
     println!("\n[3/3] Mapping reads...");
@@ -1088,19 +1355,35 @@ async fn cmd_run(args: &RunArgs) -> Result<(), String> {
             default_output_path(r1_path)
         };
 
+        let total_pairs = pairs.len();
+        let pb = ProgressBar::new(total_pairs as u64);
+        pb.set_style(ProgressStyle::default_bar()
+            .template("{spinner} Mapping pairs: [{elapsed_precise} {bar:40} {pos}/{len}] {msg}")
+            .unwrap());
+
         let mapped = if args.min_quality > 0 {
-            bp.map_paired_reads_parallel_quality(
+            let result = bp.map_paired_reads_parallel_quality(
                 &pairs,
                 output_path.to_str().unwrap(),
                 args.min_quality,
                 50,
-            ).map_err(|e| format!("Mapping failed: {}", e))?
+            ).map_err(|e| format!("Mapping failed: {}", e))?;
+
+            pb.set_position(total_pairs as u64);
+            pb.set_message(format!("{} pairs", total_pairs));
+            pb.finish_with_message("Mapping complete");
+            result
         } else {
-            bp.map_paired_reads_parallel(
+            let result = bp.map_paired_reads_parallel(
                 &pairs,
                 output_path.to_str().unwrap(),
                 50,
-            ).map_err(|e| format!("Mapping failed: {}", e))?
+            ).map_err(|e| format!("Mapping failed: {}", e))?;
+
+            pb.set_position(total_pairs as u64);
+            pb.set_message(format!("{} pairs", total_pairs));
+            pb.finish_with_message("Mapping complete");
+            result
         };
 
         // Parse SAM for results
@@ -1173,12 +1456,47 @@ async fn cmd_run(args: &RunArgs) -> Result<(), String> {
             .map(|(name, seq)| (name.as_str(), seq.as_str()))
             .collect();
 
+        let total_reads = reads_refs.len();
         let mapped_count = if args.threads > 1 {
-            bp.map_reads_parallel(&reads_refs, output_path.to_str().unwrap(), 50)
-                .map_err(|e| format!("Mapping failed: {}", e))?
+            let pb = ProgressBar::new(total_reads as u64);
+            pb.set_style(ProgressStyle::default_bar()
+                .template("{spinner} Mapping reads: [{elapsed_precise} {bar:40} {pos}/{len}] {msg}")
+                .unwrap());
+            let pb_clone = pb.clone();
+
+            let result = bp.map_reads_parallel_with_progress(
+                &reads_refs,
+                output_path.to_str().unwrap(),
+                50,
+                if total_reads > 1000 { 100 } else { 10 },
+                move |completed, total| {
+                    pb_clone.set_position(completed as u64);
+                    pb_clone.set_message(format!("{}/{} reads", completed, total));
+                },
+            ).map_err(|e| format!("Mapping failed: {}", e))?;
+
+            pb.finish_with_message("Mapping complete");
+            result
         } else {
-            bp.map_reads_to_sam(&reads_refs, output_path.to_str().unwrap(), 50)
-                .map_err(|e| format!("Mapping failed: {}", e))?
+            let pb = ProgressBar::new(total_reads as u64);
+            pb.set_style(ProgressStyle::default_bar()
+                .template("{spinner} Mapping reads: [{elapsed_precise} {bar:40} {pos}/{len}] {msg}")
+                .unwrap());
+            let pb_clone = pb.clone();
+
+            let result = bp.map_reads_to_sam_with_progress(
+                &reads_refs,
+                output_path.to_str().unwrap(),
+                50,
+                if total_reads > 1000 { 100 } else { 10 },
+                move |completed, total| {
+                    pb_clone.set_position(completed as u64);
+                    pb_clone.set_message(format!("{}/{} reads", completed, total));
+                },
+            ).map_err(|e| format!("Mapping failed: {}", e))?;
+
+            pb.finish_with_message("Mapping complete");
+            result
         };
 
         let elapsed = start.elapsed();

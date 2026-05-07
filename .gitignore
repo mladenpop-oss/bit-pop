@@ -54,3 +54,6 @@ SRR*.fastq
 # Private development files
 Plan.txt
 razvoj.md
+plan.md
+bench.md
+multi-index.md

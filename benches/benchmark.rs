@@ -1,6 +1,6 @@
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use bit_pop::BitPop;
-use bit_pop::align::{two_bit_align, smith_waterman, bit_parallel_exact};
+use bit_pop::align::{two_bit_align, smith_waterman, bit_parallel_exact, myers_edit_distance_gaps, myers_edit_distance_nano};
 use bit_pop::fm::FmIndex;
 use bit_pop::serialize::{serialize_bitpop, deserialize_bitpop};
 
@@ -98,6 +98,57 @@ fn bench_comparison(c: &mut Criterion) {
         group.throughput(Throughput::Elements(size as u64));
         group.bench_with_input(format!("{size}bp_two_bit"), &(), |b, _| b.iter(|| two_bit_align(&read, &genome)));
         group.bench_with_input(format!("{size}bp_smith_waterman"), &(), |b, _| b.iter(|| smith_waterman(&read, &genome)));
+    }
+
+    group.finish();
+}
+
+// --- Myers vs Smith-Waterman benchmarks ---
+
+fn bench_myers_vs_sw(c: &mut Criterion) {
+    let mut group = c.benchmark_group("myers_vs_sw");
+
+    for size in [15, 20, 30] {
+        let pattern = encode_seq(&pseudo_random_sequence(size));
+        let text = encode_seq(&format!("TTTTT{}", pseudo_random_sequence(size + 20)));
+
+        group.throughput(Throughput::Elements(size as u64));
+        group.bench_with_input(format!("{size}bp_myers_gaps"), &pattern.clone(), |b, p| {
+            b.iter(|| myers_edit_distance_gaps(p, &text, 2, -1, -2))
+        });
+        group.bench_with_input(format!("{size}bp_myers_nano"), &pattern.clone(), |b, p| {
+            b.iter(|| myers_edit_distance_nano(p, &text))
+        });
+        group.bench_with_input(format!("{size}bp_smith_waterman"), &pattern.clone(), |b, p| {
+            b.iter(|| smith_waterman(p, &text))
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_myers_accuracy(c: &mut Criterion) {
+    let mut group = c.benchmark_group("myers_accuracy");
+
+    let test_cases = [
+        ("perfect", "ACGTACGTACGTACGTACGT", "ACGTACGTACGTACGTACGT"),
+        ("1_mismatch", "ACGTACGTACGTACGTACGT", "ACGTACGTTCGTACGTACGT"),
+        ("2_mismatches", "ACGTACGTACGTACGTACGT", "ACGTTCGTTCAAGTACGTACGT"),
+        ("1_ins", "ACGTACGTACGTACGTACGT", "ACGTACGTAACGTACGTACGT"),
+        ("1_del", "ACGTACGTACGTACGTACGT", "ACGTACGTCGTACGTACGT"),
+    ];
+
+    for (name, pat_str, text_str) in test_cases {
+        let pattern = encode_seq(pat_str);
+        let text = encode_seq(text_str);
+
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                let myers_score = myers_edit_distance_gaps(&pattern, &text, 2, -1, -2);
+                let (sw_score, _) = smith_waterman(&pattern, &text);
+                (myers_score, sw_score)
+            })
+        });
     }
 
     group.finish();
@@ -354,6 +405,8 @@ criterion_group!(
     bench_smith_waterman,
     bench_bit_parallel_exact,
     bench_comparison,
+    bench_myers_vs_sw,
+    bench_myers_accuracy,
     bench_fm_build,
     bench_fm_backward_search,
     bench_fm_count_occurrences,

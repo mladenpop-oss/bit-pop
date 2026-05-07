@@ -16,7 +16,7 @@ use std::fmt;
 use std::collections::HashMap;
 use std::io;
 
-use fm::FmIndex;
+use fm::{FmIndex, SpacedSeed};
 use rayon::prelude::*;
 
 /// Default threshold for filtering repetitive k-mers.
@@ -302,8 +302,20 @@ pub struct BitPop {
     /// K-mer size for indexing
     k: usize,
 
+    /// Whether to auto-scale k based on genome size
+    auto_k: bool,
+
     /// Number of top rarest k-mers to try as anchors (for error tolerance)
     top_n: usize,
+
+    /// Whether to use spaced seed pattern for k-mer matching
+    use_spaced_seed: bool,
+
+    /// Spaced seed pattern (default: 11101001110111)
+    spaced_seed_pattern: Vec<bool>,
+
+    /// Read type: "short" or "long"
+    read_type: String,
 }
 
 impl BitPop {
@@ -315,7 +327,46 @@ impl BitPop {
             genomes: HashMap::new(),
             genome_names: HashMap::new(),
             k: _k,
+            auto_k: false,
             top_n: 1,
+            use_spaced_seed: false,
+            spaced_seed_pattern: vec![true, true, true, false, true, false, false, true, true, true, false, true, true, true],
+            read_type: "short".to_string(),
+        }
+    }
+
+    /// Enable auto-scaling of k-mer size based on total genome size.
+    pub fn set_auto_k(&mut self, auto_k: bool) {
+        self.auto_k = auto_k;
+    }
+
+    /// Compute optimal k-mer size based on total genome size and read type.
+    /// Formula: k = floor(log2(genome_size) / log2(4)) - 2
+    pub fn compute_optimal_k(&self) -> usize {
+        if !self.auto_k {
+            return self.k;
+        }
+
+        let total_size: usize = self.genomes.values().map(|seq| seq.len()).sum();
+        
+        if total_size == 0 {
+            return self.k;
+        }
+
+        let genome_log2 = (total_size as f64).log2() / 2.0;
+        let optimal_k = (genome_log2.floor() as usize).saturating_sub(2);
+
+        if self.read_type == "long" {
+            optimal_k.clamp(13, 19)
+        } else {
+            optimal_k.clamp(10, 15)
+        }
+    }
+
+    /// Recompute k based on current genome sizes if auto_k is enabled.
+    pub fn recompute_k(&mut self) {
+        if self.auto_k {
+            self.k = self.compute_optimal_k();
         }
     }
 
@@ -328,6 +379,21 @@ impl BitPop {
     /// Get the current top_n setting.
     pub fn top_n(&self) -> usize {
         self.top_n
+    }
+
+    /// Enable/disable spaced seed pattern for k-mer matching.
+    pub fn set_spaced_seed(&mut self, use_spaced: bool) {
+        self.use_spaced_seed = use_spaced;
+    }
+
+    /// Set a custom spaced seed pattern.
+    pub fn set_spaced_seed_pattern(&mut self, pattern: &str) {
+        self.spaced_seed_pattern = pattern.chars().map(|c| c == '1').collect();
+    }
+
+    /// Set the read type: "short" (Illumina) or "long" (Nanopore/PacBio).
+    pub fn set_read_type(&mut self, read_type: &str) {
+        self.read_type = read_type.to_lowercase();
     }
 
     /// Add a genome (reference sequence) to the index.
@@ -345,6 +411,8 @@ impl BitPop {
      /// Finalize the index: construct the FM-index from all stored genomes.
     /// After build, the index is immutable.
     pub fn build(&mut self) {
+        self.recompute_k();
+
         let mut genome_list: Vec<(u32, &str, &[u8])> = self.genomes.iter()
             .map(|(gid, seq)| {
                 (*gid, self.genome_names.get(gid).map(|s| s.as_str()).unwrap_or(""), seq.as_slice())
@@ -357,10 +425,11 @@ impl BitPop {
         self.fm_index = Some(FmIndex::build(&genomes));
     }
 
-    /// Finalize the index with parallel FM-Index build using rayon.
-    /// Collects genome data into owned vectors first, then builds in parallel.
+   /// Finalize the index with parallel FM-Index build using rayon.
+    /// Parallelizes BWT construction and OccCounter building.
     pub fn build_parallel(&mut self) {
-        // First, collect all genome data into owned vectors
+        self.recompute_k();
+
         let mut genome_list: Vec<(u32, String, Vec<u8>)> = self.genomes.iter()
             .map(|(gid, seq)| {
                 let name = self.genome_names.get(gid).cloned().unwrap_or_default();
@@ -369,17 +438,15 @@ impl BitPop {
             .collect();
         genome_list.sort_by_key(|(gid, _, _)| *gid);
 
-        // Parallel build: encode genomes in parallel
         let genomes: Vec<(String, Vec<u8>)> = genome_list.into_par_iter()
             .map(|(_, name, seq)| (name, seq))
             .collect();
 
-        // Convert to reference format for FmIndex::build
         let genome_refs: Vec<(&str, &[u8])> = genomes.iter()
             .map(|(name, seq)| (name.as_str(), seq.as_slice()))
             .collect();
 
-        self.fm_index = Some(FmIndex::build(&genome_refs));
+        self.fm_index = Some(FmIndex::build_parallel(&genome_refs));
     }
 
     /// Load genomes from a FASTA file.
@@ -387,6 +454,24 @@ impl BitPop {
     /// After loading, call `build()` to compress.
     pub fn load_genome_fasta(&mut self, path: &str) -> io::Result<Vec<u32>> {
         let mut reader = fasta::FastaReader::new(path)?;
+        let mut ids = Vec::new();
+
+        while let Some(result) = reader.next() {
+            let (header, sequence) = result?;
+            let gid = self.add_genome(&header, &sequence);
+            ids.push(gid);
+        }
+
+        Ok(ids)
+    }
+
+    /// Load genomes from a FASTA file using memory-mapped I/O.
+    /// Each header becomes a genome name. Returns assigned genome IDs.
+    /// Only available when `mmap` feature is enabled.
+    /// After loading, call `build()` to compress.
+    #[cfg(feature = "mmap")]
+    pub fn load_genome_fasta_mmap(&mut self, path: &str) -> io::Result<Vec<u32>> {
+        let mut reader = fasta::MmapFastaReader::new(path)?;
         let mut ids = Vec::new();
 
         while let Some(result) = reader.next() {
@@ -943,6 +1028,41 @@ impl BitPop {
         candidates
     }
 
+    /// Find the top-N rarest spaced k-mers in a read, sorted by ascending occurrence count.
+    /// Uses spaced seed pattern to skip certain positions in the k-mer window.
+    fn find_top_n_rarest_kmers_spaced(
+        &self,
+        encoded: &[u8],
+        fm: &FmIndex,
+        max_hits: usize,
+    ) -> Vec<(usize, Vec<u8>, usize)> {
+        if encoded.len() < self.spaced_seed_pattern.len() {
+            return Vec::new();
+        }
+
+        let mut candidates: Vec<(usize, Vec<u8>, usize)> = Vec::new();
+
+        for i in 0..=(encoded.len() - self.spaced_seed_pattern.len()) {
+            let window = &encoded[i..i + self.spaced_seed_pattern.len()];
+            let spaced_kmer: Vec<u8> = window.iter()
+                .enumerate()
+                .filter(|(j, _)| self.spaced_seed_pattern[*j])
+                .map(|(_, &b)| b)
+                .collect();
+
+            let count = fm.count_occurrences_spaced(window, &self.spaced_seed_pattern);
+            if count > 0 && count <= max_hits {
+                candidates.push((i, spaced_kmer, count));
+            }
+        }
+
+        candidates.sort_by_key(|&(_, _, count)| count);
+
+        let n = self.top_n.min(candidates.len());
+        candidates.truncate(n);
+        candidates
+    }
+
     /// Anchor-based filter: replaces k-mer co-occurrence counting with
     /// rarest-k-mer anchor + 2-bit XOR scoring.
     ///
@@ -972,11 +1092,20 @@ impl BitPop {
         };
 
         let encoded = encode_sequence(read);
-        if encoded.len() < self.k {
+        let window_size = if self.use_spaced_seed {
+            self.spaced_seed_pattern.len()
+        } else {
+            self.k
+        };
+        if encoded.len() < window_size {
             return Vec::new();
         }
 
-        let top_n_kmers = self.find_top_n_rarest_kmers(&encoded, fm, max_hits);
+        let top_n_kmers = if self.use_spaced_seed {
+            self.find_top_n_rarest_kmers_spaced(&encoded, fm, max_hits)
+        } else {
+            self.find_top_n_rarest_kmers(&encoded, fm, max_hits)
+        };
         if top_n_kmers.is_empty() {
             return Vec::new();
         }
@@ -986,7 +1115,11 @@ impl BitPop {
         let mut seen: std::collections::HashSet<(u32, u64)> = std::collections::HashSet::new();
 
         for &(anchor_read_offset, ref anchor_kmer, _) in &top_n_kmers {
-            let raw_positions = fm.find_positions(anchor_kmer, 500);
+            let raw_positions = if self.use_spaced_seed {
+                fm.find_positions_spaced(anchor_kmer, &self.spaced_seed_pattern, 500)
+            } else {
+                fm.find_positions(anchor_kmer, 500)
+            };
 
             let positions: Vec<(u32, u64)> = if raw_positions.len() > 100 {
                 let stride = raw_positions.len() / 100;
@@ -1007,7 +1140,7 @@ impl BitPop {
 
                 let estimated_read_start = position as isize - anchor_read_offset as isize;
 
-                let search_radius: isize = (self.k.max(read_len / 4)).min(200) as isize;
+                let search_radius: isize = (window_size.max(read_len / 4)).min(200) as isize;
                 let mut best_score = f64::NEG_INFINITY;
                 let mut best_cigar = String::new();
                 let mut best_offset: usize = 0;
@@ -1016,7 +1149,7 @@ impl BitPop {
                     let candidate_start = (estimated_read_start + delta).max(0) as usize;
                     if candidate_start >= genome.len() { continue; }
                     let region_end = (candidate_start + read_len).min(genome.len());
-                    if region_end - candidate_start < self.k {
+                    if region_end - candidate_start < window_size {
                         continue;
                     }
 
@@ -1712,7 +1845,11 @@ impl BitPop {
             genomes,
             genome_names,
             k,
+            auto_k: false,
             top_n: 1,
+            use_spaced_seed: false,
+            spaced_seed_pattern: vec![true, true, true, false, true, false, false, true, true, true, false, true, true, true],
+            read_type: "short".to_string(),
         }
     }
 
@@ -1893,6 +2030,106 @@ impl BitPop {
         for (read_name, read_seq) in reads {
             let results = self.map_read(read_seq, context_window);
             writer.write_mappings(read_name, read_seq, &results, &name_refs)?;
+            if !results.is_empty() {
+                mapped_count += 1;
+            }
+        }
+
+        Ok(mapped_count)
+    }
+
+    /// Map multiple reads with progress callback and write results to a SAM file.
+    /// The callback is called after every `progress_interval` reads with the current count.
+    pub fn map_reads_to_sam_with_progress(
+        &self,
+        reads: &[(&str, &str)],
+        output_path: &str,
+        context_window: usize,
+        progress_interval: usize,
+        mut on_progress: impl FnMut(usize, usize),
+    ) -> io::Result<usize> {
+        let mut writer = sam::SamWriter::new(output_path)?;
+
+        let genomes: Vec<(&str, usize)> = (0..self.genome_count() as u32)
+            .filter_map(|gid| {
+                self.genome_name(gid)
+                    .map(|name| (name, self.genome_seq_len(gid).unwrap_or(0)))
+            })
+            .collect();
+        writer.write_header(&genomes)?;
+
+        let names = self.genome_names_ordered();
+        let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+
+        let mut mapped_count = 0;
+        let total = reads.len();
+
+        for (i, (read_name, read_seq)) in reads.iter().enumerate() {
+            let results = self.map_read(read_seq, context_window);
+            writer.write_mappings(read_name, read_seq, &results, &name_refs)?;
+            if !results.is_empty() {
+                mapped_count += 1;
+            }
+            if (i + 1) % progress_interval == 0 {
+                on_progress(i + 1, total);
+            }
+        }
+
+        if reads.len() % progress_interval != 0 {
+            on_progress(reads.len(), total);
+        }
+
+        Ok(mapped_count)
+    }
+
+    /// Map multiple reads in parallel with progress reporting.
+    /// Returns the number of reads that had at least one mapping.
+    pub fn map_reads_parallel_with_progress(
+        &self,
+        reads: &[(&str, &str)],
+        output_path: &str,
+        context_window: usize,
+        progress_interval: usize,
+        on_progress: impl FnMut(usize, usize) + Send,
+    ) -> io::Result<usize> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Mutex;
+
+        let genomes_owned: Vec<(String, usize)> = (0..self.genome_count() as u32)
+            .filter_map(|gid| {
+                self.genome_name(gid)
+                    .map(|name| (name.to_string(), self.genome_seq_len(gid).unwrap_or(0)))
+            })
+            .collect();
+
+        let genome_name_refs: Vec<&str> = genomes_owned.iter().map(|(n, _)| n.as_str()).collect();
+        let genome_header: Vec<(&str, usize)> = genomes_owned.iter()
+            .map(|(n, l)| (n.as_str(), *l)).collect();
+
+        let name_refs: Vec<&str> = genome_name_refs.clone();
+        let completed = AtomicUsize::new(0);
+        let progress_callback = Mutex::new(on_progress);
+        let total = reads.len();
+
+        let mapped: Vec<(String, String, Vec<MappingResult>)> = reads.par_iter()
+            .map(|(name, seq)| {
+                let results = self.map_read(seq, context_window);
+                let count = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                if count % progress_interval == 0 || count == total {
+                    if let Ok(mut cb) = progress_callback.lock() {
+                        cb(count, total);
+                    }
+                }
+                (name.to_string(), seq.to_string(), results)
+            })
+            .collect();
+
+        let mut writer = sam::SamWriter::new(output_path)?;
+        writer.write_header(&genome_header)?;
+
+        let mut mapped_count = 0;
+        for (name, seq, results) in &mapped {
+            writer.write_mappings(name, seq, results, &name_refs)?;
             if !results.is_empty() {
                 mapped_count += 1;
             }

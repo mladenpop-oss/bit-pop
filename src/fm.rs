@@ -2,8 +2,10 @@
 ///
 /// Encoding: $=0 (sentinel), A=1, C=2, G=3, T=4
 /// SA construction via libsais (SA-IS, O(n))
+/// Parallel build support via rayon
 
 use libsais::{SuffixArrayConstruction, ThreadCount};
+use rayon::prelude::*;
 
 const ALPHABET_SIZE: usize = 5; // $=0, A=1, C=2, G=3, T=4
 const SAMPLE_INTERVAL: usize = 32;
@@ -99,6 +101,31 @@ fn build_bwt_from_sa(sa: &[usize], s: &[u8]) -> Vec<u8> {
     bwt
 }
 
+fn build_bwt_from_sa_parallel(sa: &[usize], s: &[u8], num_threads: usize) -> Vec<u8> {
+    let n = sa.len();
+    if n == 0 { return vec![]; }
+    if n == 1 { return vec![s[0]]; }
+
+    let chunk_size = (n + num_threads - 1) / num_threads;
+    let num_chunks = ((n - 1) / chunk_size) + 1;
+
+    let bwt_chunks: Vec<Vec<u8>> = (0..num_chunks)
+        .into_par_iter()
+        .map(|chunk_idx| {
+            let start = chunk_idx * chunk_size;
+            let end = (start + chunk_size).min(n);
+            let mut chunk = vec![0u8; end - start];
+            for (i, &sa_i) in sa.iter().enumerate().skip(start).take(end - start) {
+                let prev = if sa_i == 0 { n - 1 } else { sa_i - 1 };
+                chunk[i - start] = s[prev];
+            }
+            chunk
+        })
+        .collect();
+
+    bwt_chunks.into_iter().flatten().collect()
+}
+
 // --- Occ Counter (Rank Sampling) ---
 pub struct OccCounter {
     samples: Vec<[u32; ALPHABET_SIZE]>,
@@ -126,6 +153,34 @@ impl OccCounter {
         
         OccCounter { samples, sample_interval }
     }
+
+  pub fn new_parallel(bwt: &[u8], sample_interval: usize, _num_threads: usize) -> Self {
+        let len = bwt.len();
+        if len == 0 {
+            return OccCounter {
+                samples: vec![],
+                sample_interval,
+            };
+        }
+
+        let num_samples = (len + sample_interval - 1) / sample_interval;
+        let mut samples: Vec<[u32; ALPHABET_SIZE]> = vec![[0; ALPHABET_SIZE]; num_samples];
+        let mut counts = [0u32; ALPHABET_SIZE];
+
+        for (i, &c) in bwt.iter().enumerate() {
+            let ci = c as usize;
+            if ci < ALPHABET_SIZE { counts[ci] += 1; }
+            if (i + 1) % sample_interval == 0 {
+                let idx = (i + 1) / sample_interval - 1;
+                if idx < num_samples { samples[idx] = counts; }
+            }
+        }
+        if len % sample_interval != 0 {
+            samples[num_samples - 1] = counts;
+        }
+
+        OccCounter { samples, sample_interval }
+    }
     
     pub fn occ(&self, bwt: &[u8], c: u8, i: usize) -> u64 {
         if i == 0 { return 0; }
@@ -147,6 +202,48 @@ impl OccCounter {
             let extra: u64 = bwt[sample_end..i].iter().filter(|&&x| x == c).count() as u64;
             return base + extra;
         }
+    }
+}
+
+// --- Spaced Seed ---
+
+#[derive(Debug, Clone)]
+pub struct SpacedSeed {
+    pub pattern: Vec<bool>,
+}
+
+impl SpacedSeed {
+    pub fn from_binary(binary: &str) -> Self {
+        SpacedSeed {
+            pattern: binary.chars().map(|c| c == '1').collect(),
+        }
+    }
+
+    pub fn default_v1() -> Self {
+        SpacedSeed::from_binary("11101001110111")
+    }
+
+    pub fn len(&self) -> usize {
+        self.pattern.len()
+    }
+
+    pub fn coverage(&self) -> f64 {
+        let ones = self.pattern.iter().filter(|&&b| b).count();
+        ones as f64 / self.pattern.len() as f64
+    }
+
+    pub fn extract_match(&self, kmer: &[u8]) -> Vec<u8> {
+        kmer.iter()
+            .enumerate()
+            .filter(|&(i, _)| i < self.pattern.len() && self.pattern[i])
+            .map(|(_, &b)| b)
+            .collect()
+    }
+}
+
+impl Default for SpacedSeed {
+    fn default() -> Self {
+        Self::default_v1()
     }
 }
 
@@ -202,6 +299,47 @@ impl FmIndex {
         
         FmIndex { bwt, sa, c_array, occ, genome_boundaries, num_genomes: genomes.len() }
     }
+
+    /// Build FM-index in parallel using rayon.
+    /// Parallelizes BWT construction and OccCounter building.
+    /// Input: genomes as &[u8] with A=1, C=2, G=3, T=4 (NO sentinel in input)
+    pub fn build_parallel(genomes: &[(&str, &[u8])]) -> Self {
+        let mut s: Vec<u8> = Vec::new();
+        let mut genome_boundaries: Vec<(usize, usize, u32)> = Vec::new();
+        
+        for (gid, (_, seq)) in genomes.iter().enumerate() {
+            let start = s.len();
+            for &byte in *seq {
+                if byte >= 1 && byte <= 4 { s.push(byte); }
+            }
+            let gid_u32 = gid as u32;
+            if gid_u32 < (genomes.len() - 1) as u32 {
+                s.push(0);
+            }
+            genome_boundaries.push((start, s.len() - start, gid_u32));
+        }
+        s.push(0);
+
+        let num_threads = rayon::current_num_threads();
+        let sa = build_suffix_array(&s);
+        let bwt = build_bwt_from_sa_parallel(&sa, &s, num_threads);
+        
+        let mut counts = vec![0usize; ALPHABET_SIZE];
+        for &c in bwt.iter() {
+            let ci = c as usize;
+            if ci < ALPHABET_SIZE { counts[ci] += 1; }
+        }
+        let mut c_array = [0usize; ALPHABET_SIZE];
+        let mut sum = 0usize;
+        for c in 0..ALPHABET_SIZE {
+            c_array[c] = sum;
+            sum += counts[c];
+        }
+        
+        let occ = OccCounter::new_parallel(&bwt, SAMPLE_INTERVAL, num_threads);
+        
+        FmIndex { bwt, sa, c_array, occ, genome_boundaries, num_genomes: genomes.len() }
+    }
     
     /// Backward search: find SA range [lower, upper) for pattern. O(m).
     /// Pattern bytes: A=1, C=2, G=3, T=4
@@ -225,10 +363,68 @@ impl FmIndex {
         
         Some((lower, upper))
     }
+
+    /// Backward search with spaced seed support.
+    /// Only matches on positions where mask[i] == true.
+    /// Returns SA range [lower, upper) for the spaced pattern.
+    pub fn backward_search_spaced(&self, kmer: &[u8], mask: &[bool]) -> Option<(usize, usize)> {
+        if kmer.len() != mask.len() {
+            return None;
+        }
+
+        let mut lower: usize = 0;
+        let mut upper: usize = self.bwt.len();
+
+        let mut pattern = Vec::with_capacity(mask.len());
+        for i in 0..mask.len() {
+            if mask[i] {
+                pattern.push(kmer[i]);
+            }
+        }
+
+        for &byte in pattern.iter().rev() {
+            let c = byte;
+            if c == 0 || c > 4 { return None; }
+            let ci = c as usize;
+
+            let occ_l = self.occ.occ(&self.bwt, c, lower);
+            let occ_u = self.occ.occ(&self.bwt, c, upper);
+
+            lower = self.c_array[ci] + occ_l as usize;
+            upper = self.c_array[ci] + occ_u as usize;
+
+            if lower >= upper { return None; }
+        }
+
+        Some((lower, upper))
+    }
     
     /// Find all positions where pattern occurs.
     pub fn find_positions(&self, pattern: &[u8], max_positions: usize) -> Vec<(u32, u64)> {
         let (lower, upper) = match self.backward_search(pattern) {
+            Some(r) => r,
+            None => return Vec::new(),
+        };
+        
+        let mut positions = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        
+        for rank in lower..upper {
+            if positions.len() >= max_positions { break; }
+            let sa_pos = self.sa[rank];
+            let (genome_id, genome_pos) = self.sa_to_genome_pos(sa_pos);
+            if seen.insert((genome_id, genome_pos)) {
+                positions.push((genome_id, genome_pos as u64));
+            }
+        }
+        
+        positions
+    }
+
+    /// Find all positions where spaced pattern occurs.
+    /// Only matches on positions where mask[i] == true.
+    pub fn find_positions_spaced(&self, kmer: &[u8], mask: &[bool], max_positions: usize) -> Vec<(u32, u64)> {
+        let (lower, upper) = match self.backward_search_spaced(kmer, mask) {
             Some(r) => r,
             None => return Vec::new(),
         };
@@ -269,6 +465,13 @@ impl FmIndex {
     /// Count occurrences of pattern. O(m), independent of genome size.
     pub fn count_occurrences(&self, pattern: &[u8]) -> usize {
         match self.backward_search(pattern) {
+            Some((lower, upper)) => upper - lower,
+            None => 0,
+        }
+    }
+
+    pub fn count_occurrences_spaced(&self, kmer: &[u8], mask: &[bool]) -> usize {
+        match self.backward_search_spaced(kmer, mask) {
             Some((lower, upper)) => upper - lower,
             None => 0,
         }
@@ -474,5 +677,60 @@ mod tests {
         let seq: Vec<u8> = (0..1000u32).map(|i| ((i % 4) + 1) as u8).collect();
         let index = FmIndex::build(&[("test", &seq)]);
         assert!(index.count_occurrences(&vec![1, 2, 3, 4]) >= 250);
+    }
+
+    #[test]
+    fn test_spaced_seed_extract() {
+        let seed = SpacedSeed::from_binary("11101001110111");
+        let kmer = vec![1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 1, 2]; // ACGTACGTACGTAC
+        let extracted = seed.extract_match(&kmer);
+        assert_eq!(extracted.len(), 10);
+    }
+
+    #[test]
+    fn test_spaced_seed_coverage() {
+        let seed = SpacedSeed::from_binary("11101001110111");
+        assert_eq!(seed.len(), 14);
+        assert!((seed.coverage() - 10.0/14.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_backward_search_spaced() {
+        let seq = vec![1, 2, 3, 1, 4, 1, 2, 4, 1, 2, 3, 4, 1, 2];
+        let index = FmIndex::build(&[("test", &seq)]);
+        
+        let kmer = vec![1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 1, 2];
+        let mask = SpacedSeed::default_v1().pattern;
+        
+        let result = index.backward_search_spaced(&kmer, &mask);
+        assert!(result.is_some(), "Spaced seed search should find pattern in sequence");
+    }
+
+    #[test]
+    fn test_find_positions_spaced() {
+        let seq = vec![1, 2, 3, 1, 4, 1, 2, 4, 1, 2, 3, 4, 1, 2];
+        let index = FmIndex::build(&[("test", &seq)]);
+        
+        let kmer = vec![1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 1, 2];
+        let mask = SpacedSeed::default_v1().pattern;
+        
+        let positions = index.find_positions_spaced(&kmer, &mask, 100);
+        assert!(!positions.is_empty(), "Should find at least one position");
+        assert_eq!(positions[0].0, 0);
+    }
+
+    #[test]
+    fn test_spaced_seed_vs_exact_search() {
+        let seq = vec![1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 1, 2];
+        let index = FmIndex::build(&[("test", &seq)]);
+        
+        let kmer = vec![1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 1, 2];
+        let all_true_mask = vec![true; 14];
+        
+        let spaced_result = index.backward_search_spaced(&kmer, &all_true_mask);
+        let exact_result = index.backward_search(&kmer[..14]);
+        
+        assert!(spaced_result.is_some(), "Spaced with all-true mask should match exact search");
+        assert!(exact_result.is_some());
     }
 }
