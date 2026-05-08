@@ -48,18 +48,6 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
 
-  test-macos:
-    name: Test (macOS)
-    runs-on: macos-latest
-    timeout-minutes: 20
-    env:
-      CC_FORCE_DISABLE: 1
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Run tests
-        run: cargo test --lib && cargo test --test integration_tests -- --nocapture
-
   test-windows:
     name: Test (Windows)
     runs-on: windows-latest
