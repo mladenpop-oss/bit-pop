@@ -47,3 +47,35 @@ jobs:
         run: rustup component add rustfmt
       - name: Check formatting
         run: cargo fmt --check
+
+  test-macos:
+    name: Test (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run tests
+        run: cargo test --lib && cargo test --test integration_tests -- --nocapture
+
+  test-windows:
+    name: Test (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run tests
+        run: cargo test --lib && cargo test --test integration_tests -- --nocapture
+
+  test-msrv:
+    name: Test (MSRV)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run tests with Rust 1.70
+        run: |
+          rustup install 1.70.0
+          cargo +1.70.0 test --lib && cargo +1.70.0 test --test integration_tests -- --nocapture
