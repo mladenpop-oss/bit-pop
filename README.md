@@ -1,5 +1,6 @@
 # Bit-Pop: Multi-Genome DNA Read Classification
 
+[![CI](https://github.com/mladenpop-oss/bit-pop/actions/workflows/ci.yml/badge.svg)](https://github.com/mladenpop-oss/bit-pop/actions/workflows/ci.yml)
 [![Tests](https://img.shields.io/badge/tests-253%2B%20unit%2C%205%20integration-blue)](https://github.com/mladenpop-oss/bit-pop)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20043594.svg)](https://doi.org/10.5281/zenodo.20043594)
