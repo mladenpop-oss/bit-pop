@@ -3,7 +3,7 @@
 /// Encoding: $=0 (sentinel), A=1, C=2, G=3, T=4
 /// SA construction via libsais (SA-IS, O(n))
 /// Parallel build support via rayon
-use libsais::{SuffixArrayConstruction, ThreadCount};
+use libsais::SuffixArrayConstruction;
 use rayon::prelude::*;
 
 const ALPHABET_SIZE: usize = 5; // $=0, A=1, C=2, G=3, T=4
@@ -26,7 +26,7 @@ fn build_suffix_array(s: &[u8]) -> Vec<usize> {
 
     let result = SuffixArrayConstruction::for_text(s)
         .in_borrowed_buffer(&mut sa_buffer)
-        .multi_threaded(ThreadCount::openmp_default())
+        .single_threaded()
         .run();
 
     match result {
