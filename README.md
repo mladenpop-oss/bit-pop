@@ -276,7 +276,7 @@ Benchmark on the CAMI I Low Complexity dataset — 50K reads across 62 microbial
 
 **Why is overall accuracy 49.4%?** The evo_* genomes are >99.9% identical strains from the same sample assembly. They share most k-mers with each other and with their parent numeric genomes, causing reads to map to the wrong strain. This is a fundamental limitation of k-mer-based classification for near-identical genomes, not a bug.
 
-**See**: [bench.md](bench.md) and [nalaz.md](nalaz.md) for detailed analysis.
+**See**: [docs/paper.pdf](docs/paper.pdf) for detailed analysis.
 
 ## Project Structure
 
@@ -414,7 +414,7 @@ python scripts/bitpop-workflow.py merge mapped/ -o final.sam
 ### 📊 Expand Benchmarks
 - 100+ genomes and eukaryotic genomes
 - Direct comparison with Bowtie2, BWA-MEM on multi-genome tasks
-- CAMI Low Complexity: completed (62 genomes, 50K reads) — see [bench.md](bench.md)
+- CAMI Low Complexity: completed (62 genomes, 50K reads)
 
 ## Getting Help
 
