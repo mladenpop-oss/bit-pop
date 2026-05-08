@@ -295,15 +295,17 @@ mod tests {
             std::time::SystemTime::now().elapsed().unwrap().as_nanos()
         ));
 
-        let mut file = std::fs::File::create(&path).unwrap();
-        writeln!(file, "@read1").unwrap();
-        writeln!(file, "ACGTACGTACGT").unwrap();
-        writeln!(file, "+").unwrap();
-        writeln!(file, "IIIIIIIIIIII").unwrap();
-        writeln!(file, "@read2").unwrap();
-        writeln!(file, "TTTTGGGGAAAA").unwrap();
-        writeln!(file, "+").unwrap();
-        writeln!(file, "!!!!!!!!!!!!").unwrap();
+        {
+            let mut file = std::fs::File::create(&path).unwrap();
+            writeln!(file, "@read1").unwrap();
+            writeln!(file, "ACGTACGTACGT").unwrap();
+            writeln!(file, "+").unwrap();
+            writeln!(file, "IIIIIIIIIIII").unwrap();
+            writeln!(file, "@read2").unwrap();
+            writeln!(file, "TTTTGGGGAAAA").unwrap();
+            writeln!(file, "+").unwrap();
+            writeln!(file, "!!!!!!!!!!!!").unwrap();
+        }
 
         let reads = parse_fastq(path.to_str().unwrap()).unwrap();
         (path.to_str().unwrap().to_string(), reads)
