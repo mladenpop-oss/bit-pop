@@ -55,19 +55,23 @@ jobs:
         if: matrix.os != 'windows-latest'
         run: strip target/release/bit-pop 2>/dev/null || true
 
-      - name: Package artifact
+      - name: Package artifact (Unix)
+        if: matrix.os != 'windows-latest'
         shell: bash
         run: |
           mkdir -p package
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            cp target/release/bit-pop.exe package/
-            cd package
-            Compress-Archive -Path * -DestinationPath "../${{ matrix.artifact }}"
-          else
-            cp target/release/bit-pop package/
-            cd package
-            tar czf "../${{ matrix.artifact }}" .
-          fi
+          cp target/release/bit-pop package/
+          cd package
+          tar czf "../${{ matrix.artifact }}" .
+
+      - name: Package artifact (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Name package -Force
+          Copy-Item target/release/bit-pop.exe package/
+          Set-Location package
+          Compress-Archive -Path * -DestinationPath "../${{ matrix.artifact }}" -Force
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
