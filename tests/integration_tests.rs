@@ -48,7 +48,10 @@ fn test_map_reads_to_sam() {
 
     // Load and map
     let bp = BitPop::deserialize_from_file(index_path.to_str().unwrap()).unwrap();
-    let reads = vec![("test_read", "AGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCT")];
+    let reads = vec![(
+        "test_read",
+        "AGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCT",
+    )];
     let _mapped = bp
         .map_reads_to_sam(&reads, sam_path.to_str().unwrap(), 50)
         .unwrap();
