@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Multi-stage genomic read mapper: k-mer inverted index → bit-level alignment → multi-genome ranking"
 license = "MIT"
-authors = ["Mladen Popovic <pop>"]
+authors = ["Mladen Popovic <mladenpop@gmail.com>"]
 
 [dependencies]
 rayon = "1.10"

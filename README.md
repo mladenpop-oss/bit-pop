@@ -1,5 +1,9 @@
 # Bit-Pop: Multi-Genome DNA Read Classification
 
+[![Tests](https://img.shields.io/badge/tests-253%2B%20unit%2C%205%20integration-blue)](https://github.com/mladenpop-oss/bit-pop)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20043594.svg)](https://doi.org/10.5281/zenodo.20043594)
+
 > **Ultra-fast multi-genome DNA read classification in under 1 second.** Maps 20k reads across 3 genomes at **99.3% accuracy** using a compact FM-index built in Rust with bit-level parallelism.
 
 **Quick benchmark**: 19.7 Mb across 3 genomes (E. coli, S. aureus, S. cerevisiae) → **99.3% mapping rate**, **99.9% classification accuracy**, **0.9s per 10k reads**.
@@ -10,7 +14,7 @@ While existing aligners (Bowtie2, BWA, minimap2) map reads to single reference g
 
 ```bash
 # 1. Build (requires Rust: https://rustup.rs)
-git clone https://github.com/anomalyco/bit-pop.git
+git clone https://github.com/mladenpop-oss/bit-pop.git
 cd bit-pop
 cargo build --release
 
@@ -412,6 +416,13 @@ python scripts/bitpop-workflow.py merge mapped/ -o final.sam
 - Direct comparison with Bowtie2, BWA-MEM on multi-genome tasks
 - CAMI Low Complexity: completed (62 genomes, 50K reads) — see [bench.md](bench.md)
 
+## Getting Help
+
+- **Documentation**: This README and [docs/paper.pdf](docs/paper.pdf)
+- **Issues**: [GitHub Issues](https://github.com/mladenpop-oss/bit-pop/issues) — bug reports and feature requests
+- **Discussions**: [GitHub Discussions](https://github.com/mladenpop-oss/bit-pop/discussions) — questions and feature ideas
+- **Citation**: See [CITATION.cff](docs/CITATION.cff) or the DOI below
+
 ## Paper
 
 [Read the full paper (PDF)](docs/paper.pdf)
@@ -422,9 +433,19 @@ Source code available under the MIT License.
 
 ## Citation
 
+```bibtex
+@software{popovic_2026_bitpop,
+  author = {Popovi{\'c}, Mladen},
+  title = {Bit-Pop: A Proof-of-Concept Tool for Multi-Genome DNA Read Classification},
+  year = {2026},
+  doi = {10.5281/zenodo.20043594},
+  url = {https://github.com/mladenpop-oss/bit-pop}
+}
 ```
-Popović, M. (2026). Bit-Pop: A Proof-of-Concept Tool for Multi-Genome DNA Read Classification.
-```
+
+Or plain text:
+
+> Popović, M. (2026). Bit-Pop: A Proof-of-Concept Tool for Multi-Genome DNA Read Classification. https://doi.org/10.5281/zenodo.20043594
 
 ## License
 
