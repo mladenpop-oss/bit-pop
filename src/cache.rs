@@ -29,6 +29,12 @@ pub struct CacheManifest {
     pub genomes: HashMap<String, CachedGenome>,
 }
 
+impl Default for CacheManifest {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CacheManifest {
     pub fn new() -> Self {
         Self {

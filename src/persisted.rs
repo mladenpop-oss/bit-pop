@@ -1,10 +1,13 @@
 use std::io::{Read, Result as IoResult};
+use std::collections::HashMap;
 
 use memmap2::Mmap;
 use sha2::{Digest, Sha256};
 
 use crate::fm::{FmIndex, OccCounter};
 use crate::BitPop;
+
+type GenomeData = (HashMap<u32, Vec<u8>>, HashMap<u32, String>);
 
 // --- File Format Constants ---
 
@@ -24,6 +27,7 @@ const SECTION_GENOMES: [u8; 16] = *b"GENOMES\0\0\0\0\0\0\0\0\0";
 const NUM_SECTIONS_V5: usize = 4;
 
 /// Represents a section in the persisted file.
+#[allow(dead_code)]
 struct SectionInfo {
     name: [u8; SECTION_NAME_LEN],
     offset: u64,
@@ -63,13 +67,13 @@ pub fn save_bitpop(bp: &BitPop, path: &str) -> IoResult<()> {
     // 1. Serialize FM-Index (compressed fallback)
     let fm_data = serialize_fm_index(bp)?;
     let fm_compressed = zstd::encode_all(fm_data.as_slice(), 3).map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::Other, format!("zstd FM compress failed: {}", e))
+        std::io::Error::other(format!("zstd FM compress failed: {}", e))
     })?;
 
     // 2. Serialize genomes (compressed)
     let genomes_data = serialize_genomes(bp)?;
     let genomes_compressed = zstd::encode_all(genomes_data.as_slice(), 3).map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::Other, format!("zstd genomes compress failed: {}", e))
+        std::io::Error::other(format!("zstd genomes compress failed: {}", e))
     })?;
 
     // 3. Serialize BWT uncompressed (4 values per byte, 2 bits each)
@@ -96,8 +100,7 @@ pub fn save_bitpop(bp: &BitPop, path: &str) -> IoResult<()> {
     write_section_header(&mut section_table, &SECTION_GENOMES, offset, genomes_compressed.len() as u64, genomes_data.len() as u64, 0);
 
     // 6. Assemble file: header + section_table + sections
-    let mut all_data = Vec::new();
-    all_data.reserve((offset + genomes_compressed.len() as u64 + 32) as usize);
+    let mut all_data = Vec::with_capacity((offset + genomes_compressed.len() as u64 + 32) as usize);
     
     let header_placeholder = vec![0u8; HEADER_SIZE];
     all_data.extend_from_slice(&header_placeholder);
@@ -158,10 +161,10 @@ fn serialize_fm_index(bp: &BitPop) -> IoResult<Vec<u8>> {
     data.extend_from_slice(&(bwt_len as u64).to_le_bytes());
 
     // BWT: 2 bits per entry (4 values per byte)
-    let bwt_packed_len = (bwt_len + 3) / 4;
+    let bwt_packed_len = bwt_len.div_ceil(4);
     let mut bwt_packed = vec![0u8; bwt_packed_len];
     for i in 0..bwt_len {
-        let v = (fm.bwt_at(i) & 3) as u8;
+        let v = fm.bwt_at(i) & 3;
         let byte_idx = i / 4;
         let bit_offset = 6 - (i % 4) * 2;
         bwt_packed[byte_idx] |= v << bit_offset;
@@ -186,14 +189,14 @@ fn serialize_fm_index(bp: &BitPop) -> IoResult<Vec<u8>> {
     for &(start, len, gid) in boundaries {
         data.extend_from_slice(&(start as u32).to_le_bytes());
         data.extend_from_slice(&(len as u32).to_le_bytes());
-        data.extend_from_slice(&(gid as u32).to_le_bytes());
+        data.extend_from_slice(&gid.to_le_bytes());
     }
 
     // Sample interval
     data.extend_from_slice(&32u32.to_le_bytes());
 
     // Sentinel mask
-    let sentinel_mask_len = (bwt_len + 7) / 8;
+    let sentinel_mask_len = bwt_len.div_ceil(8);
     let mut sentinel_mask = vec![0u8; sentinel_mask_len];
     for i in 0..bwt_len {
         if fm.bwt_at(i) == 0 {
@@ -246,7 +249,7 @@ fn serialize_bwt_uncompressed(bp: &BitPop) -> IoResult<Vec<u8>> {
     
     // BWT as raw bytes (one value per byte, values 0-4)
     for i in 0..bwt_len {
-        data.push(fm.bwt_at(i) as u8);
+        data.push(fm.bwt_at(i));
     }
 
     Ok(data)
@@ -387,7 +390,7 @@ pub fn load_bitpop(path: &str) -> IoResult<BitPop> {
     let genomes_end = genomes_start + genomes_section.compressed_size as usize;
     let genomes_compressed = &mmap[genomes_start..genomes_end];
     let genomes_decompressed = zstd::decode_all(genomes_compressed).map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::Other, format!("Genomes decompression failed: {}", e))
+        std::io::Error::other(format!("Genomes decompression failed: {}", e))
     })?;
 
     let (genomes_map, genome_names_map) = parse_genomes_from_bytes(&genomes_decompressed, num_genomes)?;
@@ -418,13 +421,13 @@ pub fn load_bitpop(path: &str) -> IoResult<BitPop> {
         let fm_end = fm_start + fm_section.compressed_size as usize;
         let fm_compressed = &mmap[fm_start..fm_end];
         let fm_data = zstd::decode_all(fm_compressed).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::Other, format!("FM-index decompression failed: {}", e))
+            std::io::Error::other(format!("FM-index decompression failed: {}", e))
         })?;
 
         // Skip bwt_len (8 bytes) + bwt_packed data in FM_INDEX section
         // We already have BWT from the uncompressed section
         let bwt_len_u64 = u64::from_le_bytes(fm_data[0..8].try_into().unwrap());
-        let bwt_packed_len = ((bwt_len_u64 + 3) / 4) as usize;
+        let bwt_packed_len = bwt_len_u64.div_ceil(4) as usize;
         let mut fm_pos: usize = 8 + bwt_packed_len;
 
         // SA_LEN + SA entries in FM_INDEX section — skip (we already have SA from uncompressed section)
@@ -528,14 +531,14 @@ pub fn load_bitpop(path: &str) -> IoResult<BitPop> {
         let fm_end = fm_start + fm_section.compressed_size as usize;
         let fm_compressed = &mmap[fm_start..fm_end];
         let fm_data = zstd::decode_all(fm_compressed).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::Other, format!("FM-index decompression failed: {}", e))
+            std::io::Error::other(format!("FM-index decompression failed: {}", e))
         })?;
 
         // Parse FM-Index components from fm_data (same as original load_bitpop)
         let bwt_len = u64::from_le_bytes(fm_data[0..8].try_into().unwrap()) as usize;
         let mut fm_pos = 8;
 
-        let bwt_packed_len = (bwt_len + 3) / 4;
+        let bwt_packed_len = bwt_len.div_ceil(4);
         let bwt_data_start = fm_pos;
         fm_pos += bwt_packed_len;
 
@@ -753,9 +756,9 @@ fn load_sa_from_mmap(mmap: &Mmap, section: &SectionInfo) -> IoResult<Vec<usize>>
 fn parse_genomes_from_bytes(
     data: &[u8],
     num_genomes: usize,
-) -> IoResult<(std::collections::HashMap<u32, Vec<u8>>, std::collections::HashMap<u32, String>)> {
-    let mut genomes: std::collections::HashMap<u32, Vec<u8>> = std::collections::HashMap::new();
-    let mut genome_names: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+) -> IoResult<GenomeData> {
+    let mut genomes: HashMap<u32, Vec<u8>> = HashMap::new();
+    let mut genome_names: HashMap<u32, String> = HashMap::new();
 
     let mut gpos = 0;
     for i in 0..num_genomes {
@@ -845,7 +848,7 @@ pub fn load_legacy_bitpop(path: &str) -> IoResult<BitPop> {
     let compressed = &raw_data[compressed_start..checksum_start];
 
     let decompressed = zstd::decode_all(compressed).map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::Other, format!("zstd decompression failed: {}", e))
+        std::io::Error::other(format!("zstd decompression failed: {}", e))
     })?;
 
     // Parse outer all_data to get fm_compressed and genomes_compressed
@@ -860,13 +863,13 @@ pub fn load_legacy_bitpop(path: &str) -> IoResult<BitPop> {
     let genomes_compressed_offset = 8 + fm_compressed_len;
 
     let fm_data = zstd::decode_all(fm_compressed).map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::Other, format!("FM-index decompression failed: {}", e))
+        std::io::Error::other(format!("FM-index decompression failed: {}", e))
     })?;
 
     // Parse FM-Index (same as in load_bitpop)
     let bwt_len = u64::from_le_bytes(fm_data[0..8].try_into().unwrap()) as usize;
     let mut fm_pos = 8;
-    let bwt_packed_len = (bwt_len + 3) / 4;
+    let bwt_packed_len = bwt_len.div_ceil(4);
     let bwt_data_start = fm_pos;
     fm_pos += bwt_packed_len;
 
@@ -985,7 +988,7 @@ pub fn load_legacy_bitpop(path: &str) -> IoResult<BitPop> {
     let genomes_compressed = &decompressed[genomes_compressed_offset+8..genomes_compressed_offset+8+genomes_compressed_len];
 
     let genomes_decompressed = zstd::decode_all(genomes_compressed).map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::Other, format!("Genomes decompression failed: {}", e))
+        std::io::Error::other(format!("Genomes decompression failed: {}", e))
     })?;
 
     let mut gpos = 0;
@@ -1041,25 +1044,21 @@ pub fn load_legacy_bitpop(path: &str) -> IoResult<BitPop> {
 /// Load a BitPop instance, auto-detecting the format (new memmap or legacy).
 pub fn load_bitpop_auto(path: &str) -> IoResult<BitPop> {
     // Try new format first
-    match std::fs::metadata(path) {
-        Ok(meta) => {
-            if meta.len() as u64 >= (HEADER_SIZE + 32) as u64 {
-                // Peek at the version field to detect format
-                let mut file = std::fs::File::open(path)?;
-                let mut header_buf = [0u8; 14];
-                if file.read_exact(&mut header_buf).is_ok() {
-                    if &header_buf[0..4] == &MAGIC[..] {
-                        let version = u32::from_le_bytes(header_buf[4..8].try_into().unwrap());
-                        if version == VERSION {
-                            return load_bitpop(path); // new format with memmap2
-                        } else if version == 3 {
-                            return load_legacy_bitpop(path); // legacy format
-                        }
-                    }
+    if let Ok(meta) = std::fs::metadata(path) {
+        if meta.len() >= (HEADER_SIZE + 32) as u64 {
+            // Peek at the version field to detect format
+            let mut file = std::fs::File::open(path)?;
+            let mut header_buf = [0u8; 14];
+            if file.read_exact(&mut header_buf).is_ok()
+                && header_buf[0..4] == MAGIC[..] {
+                let version = u32::from_le_bytes(header_buf[4..8].try_into().unwrap());
+                if version == VERSION {
+                    return load_bitpop(path); // new format with memmap2
+                } else if version == 3 {
+                    return load_legacy_bitpop(path); // legacy format
                 }
             }
         }
-        Err(_) => {}
     }
     
     // Fallback: try legacy
@@ -1215,10 +1214,10 @@ mod tests {
         let mut fm_data = Vec::new();
         fm_data.extend_from_slice(&(bwt_len as u64).to_le_bytes());
         
-        let bwt_packed_len = (bwt_len + 3) / 4;
+        let bwt_packed_len = bwt_len.div_ceil(4);
         let mut bwt_packed = vec![0u8; bwt_packed_len];
         for i in 0..bwt_len {
-            let v = (fm.bwt_at(i) & 3) as u8;
+ let v = fm.bwt_at(i) & 3;
             let byte_idx = i / 4;
             let bit_offset = 6 - (i % 4) * 2;
             bwt_packed[byte_idx] |= v << bit_offset;
@@ -1238,11 +1237,11 @@ mod tests {
         for &(start, len, gid) in boundaries {
             fm_data.extend_from_slice(&(start as u32).to_le_bytes());
             fm_data.extend_from_slice(&(len as u32).to_le_bytes());
-            fm_data.extend_from_slice(&(gid as u32).to_le_bytes());
+            fm_data.extend_from_slice(&gid.to_le_bytes());
         }
         fm_data.extend_from_slice(&32u32.to_le_bytes());
 
-        let sentinel_mask_len = (bwt_len + 7) / 8;
+        let sentinel_mask_len = bwt_len.div_ceil(8);
         let mut sentinel_mask = vec![0u8; sentinel_mask_len];
         for i in 0..bwt_len {
             if fm.bwt_at(i) == 0 {
@@ -1304,6 +1303,7 @@ mod tests {
 }
 
 /// Compute SHA256 hash of data.
+#[allow(dead_code)]
 fn sha256(data: &[u8]) -> [u8; 32] {
     use sha2::Digest;
     let mut hasher = sha2::Sha256::new();

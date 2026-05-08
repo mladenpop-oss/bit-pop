@@ -1,7 +1,7 @@
 /// Bit-level alignment algorithms for DNA sequences.
 /// Uses 2-bit encoding (A=00, C=01, G=10, T=11) for bit-parallelism.
 /// Pattern length <= 31 bases fits in u64 → 31 bases processed per CPU instruction.
-
+///
 /// 2-bit XOR alignment — simple, fast, reliable.
 /// Slides pattern across text, counts exact matches via XOR, returns best score + CIGAR.
 /// Pattern <= 31 bases (62 bits fit in u64).
@@ -37,8 +37,8 @@ pub fn two_bit_align(pattern: &[u8], text: &[u8]) -> (f64, String, usize) {
     let mut best_offset = 0usize;
 
     // Slide window across text
-    for i in m..n {
-        win_val = ((win_val << 2) | (text[i] as u64 & 3)) & mask;
+    for (i, &b) in text.iter().enumerate().skip(m) {
+        win_val = ((win_val << 2) | (b as u64 & 3)) & mask;
         let xor = pat_val ^ win_val;
         let errors = count_2bit_diffs(xor, m);
         let score = (m - errors) as f64 / m as f64;
@@ -117,15 +117,15 @@ pub fn bit_parallel_exact(pattern: &[u8], text: &[u8]) -> Vec<usize> {
 
     // Sliding window: encode each window of size m and compare
     let mut win_val: u64 = 0;
-    for (_i, &b) in text.iter().take(m).enumerate() {
+    for &b in text.iter().take(m) {
         win_val = (win_val << 2) | b as u64;
     }
     if win_val == pat_val {
         matches.push(0);
     }
 
-    for i in m..text.len() {
-        win_val = ((win_val << 2) | text[i] as u64) & ((1 << (m * 2)) - 1);
+    for (i, &b) in text.iter().enumerate().skip(m) {
+        win_val = ((win_val << 2) | b as u64) & ((1 << (m * 2)) - 1);
         if win_val == pat_val {
             matches.push(i + 1 - m);
         }
@@ -312,8 +312,8 @@ pub fn bit_parallel_approx(
     // Mask for sliding window: keep only m*2 bits
     let mask = (1u64 << (m * 2)) - 1;
 
-    for i in m..text.len() {
-        win_val = ((win_val << 2) | (text[i] as u64 & 3)) & mask;
+    for &b in text.iter().skip(m) {
+        win_val = ((win_val << 2) | (b as u64 & 3)) & mask;
         let xor = pat_val ^ win_val;
         errors = count_2bit_diffs(xor, m);
         if errors <= max_errors {
@@ -353,6 +353,7 @@ fn count_2bit_diffs(xor_val: u64, num_bases: usize) -> usize {
 /// Convert to fraction: fraction = matches / m
 ///
 /// Complexity: O(n) for m ≤ 31 vs O(n×m) for standard SW.
+#[allow(unused_variables, unused_assignments)]
 pub fn bit_vector_sw(pattern: &[u8], text: &[u8]) -> i32 {
     let m = pattern.len();
     let n = text.len();
@@ -429,6 +430,7 @@ pub fn bit_vector_sw(pattern: &[u8], text: &[u8]) -> i32 {
 /// Bit-vector alignment with SW-compatible scoring.
 /// Returns (sw_score, best_offset) where sw_score uses match=+2, mismatch=-1.
 /// Internally uses bit-parallel matching, converts to SW scale.
+#[allow(unused_variables, unused_assignments)]
 pub fn bit_vector_sw_scored(pattern: &[u8], text: &[u8]) -> (i32, usize) {
     let m = pattern.len();
     let n = text.len();
@@ -529,6 +531,7 @@ pub fn bit_vector_sw_windowed(
 /// 
 /// Returns (edit_distance, best_offset) where edit_distance accounts for
 /// mismatches and gaps with configurable penalties.
+#[allow(unused_variables, unused_assignments)]
 pub fn myers_edit_distance_gaps(
     pattern: &[u8],
     text: &[u8],
@@ -544,7 +547,7 @@ pub fn myers_edit_distance_gaps(
     }
 
     let gap_cost = gap_penalty.abs();
-    let mismatch_cost = mismatch_penalty.abs();
+    let _mismatch_cost = mismatch_penalty.abs();
 
     let mut eq = [0u64; 4];
     for i in 0..m {
@@ -552,7 +555,7 @@ pub fn myers_edit_distance_gaps(
     }
 
     let mask = (1u64 << m) - 1;
-    let all_ones = !0u64 & mask;
+    let all_ones = mask;
 
     let mut ph: u64 = 0;
     let mut mh: u64 = all_ones;
@@ -566,8 +569,8 @@ pub fn myers_edit_distance_gaps(
     for j in 0..n {
         let xr = eq[(text[j] & 3) as usize];
 
-        let vp = (ph.wrapping_sub(pe) & !0u64).wrapping_add(gap_cost as u64);
-        let vm = (mh.wrapping_sub(me) & !0u64).wrapping_add(gap_cost as u64);
+        let _vp = ph.wrapping_sub(pe);
+        let _vm = mh.wrapping_sub(me);
 
         let q = ((mh | xr).wrapping_add(mh)) ^ mh;
         let qh = q >> 1;
@@ -589,7 +592,7 @@ pub fn myers_edit_distance_gaps(
         ph = rh & mask;
         mh = rm;
 
-        let score_diff = ((ph & mask).count_ones() as i32 - (mh & mask).count_ones() as i32)
+        let _score_diff = ((ph & mask).count_ones() as i32 - (mh & mask).count_ones() as i32)
             * (match_score - mismatch_penalty);
         let score = (ph & mask).count_ones() as i32 * match_score;
 
@@ -605,6 +608,7 @@ pub fn myers_edit_distance_gaps(
 /// Bit-vector alignment with indel support for Nanopore reads.
 /// Uses Myers' algorithm extended with gap penalties.
 /// Returns (sw_score, best_offset, cigar_hint).
+#[allow(unused_variables, unused_assignments)]
 pub fn myers_edit_distance_nano(
     pattern: &[u8],
     text: &[u8],
@@ -622,7 +626,7 @@ pub fn myers_edit_distance_nano(
     }
 
     let mask = (1u64 << m) - 1;
-    let all_ones = !0u64 & mask;
+    let all_ones = mask;
 
     let mut ph: u64 = 0;
     let mut mh: u64 = all_ones;
@@ -671,7 +675,7 @@ pub fn myers_edit_distance_nano(
     let cigar = if best_score >= m as i32 {
         format!("{}M", m)
     } else {
-        let errors = m as i32 - ((best_ph.count_ones() as i32 + (best_mh & 0x5555555555555555).count_ones() as i32));
+        let errors = m as i32 - (best_ph.count_ones() as i32 + (best_mh & 0x5555555555555555).count_ones() as i32);
         let match_len = if errors > 0 { (m as i32 - errors).max(0) as usize } else { m };
         if errors <= 2 {
             format!("{}M{}X", m, errors)
@@ -691,12 +695,10 @@ pub fn bit_alignment_score(pattern: &[u8], text_region: &[u8]) -> f64 {
         return 0.0;
     }
 
-    let m = pattern.len();
+   let m = pattern.len();
 
     // Fast path: pattern fits in u64, use bit-parallel comparison
     if m <= 31 && text_region.len() >= m {
-        let mut best_score = 0.0f64;
-
         // Pack pattern
         let mut pat_val: u64 = 0;
         for &b in pattern {
@@ -713,7 +715,7 @@ pub fn bit_alignment_score(pattern: &[u8], text_region: &[u8]) -> f64 {
 
         let xor = pat_val ^ win_val;
         let errors = count_2bit_diffs(xor, m);
-        best_score = 1.0 - (errors as f64 / m as f64);
+        let mut best_score = 1.0 - (errors as f64 / m as f64);
 
         // Slide window
         for i in m..text_region.len() {
@@ -802,7 +804,7 @@ pub fn two_bit_align_with_quality(
         }
     }
 
-    let final_score = best_adjusted.max(0.0).min(1.0);
+    let final_score = best_adjusted.clamp(0.0, 1.0);
     let cigar = build_cigar_from_xor(best_xor, m);
 
     (final_score, cigar, best_offset, best_penalty)
@@ -865,7 +867,7 @@ pub fn two_bit_score_chunks_with_quality(
     for (ci, chunk) in pattern.chunks(chunk_size).enumerate() {
         let chunk_start = ci * chunk_size;
         let chunk_end = (chunk_start + chunk_size).min(m);
-        let chunk_len = chunk_end - chunk_start;
+        let _chunk_len = chunk_end - chunk_start;
 
         let text_start = chunk_start.min(text.len());
         let text_end = chunk_end.min(text.len());
@@ -1083,7 +1085,7 @@ pub fn smith_waterman_score(
         let (score, _) = smith_waterman(pattern, text);
         // Normalize: max possible score for match=+2, mismatch=-1 is 2*m
         let normalized = (score as f64) / (2.0 * m as f64);
-        (normalized.min(1.0).max(0.0), 0)
+        (normalized.clamp(0.0, 1.0), 0)
     } else {
         // Chunked SW for long reads
         let chunk_size = 31;
@@ -1114,7 +1116,7 @@ pub fn smith_waterman_score(
         }
 
         let normalized = (best_score as f64) / (2.0 * m as f64);
-        (normalized.min(1.0).max(0.0), best_offset)
+        (normalized.clamp(0.0, 1.0), best_offset)
     }
 }
 

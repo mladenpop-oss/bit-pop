@@ -1,3 +1,94 @@
+//! Bit-Pop: Ultra-fast multi-genome DNA read classification.
+//!
+//! Bit-Pop maps DNA sequencing reads across multiple reference genomes using
+//! a compact FM-index with bit-level parallelism. It identifies **which genome**
+//! in a collection best matches each read.
+//!
+//! # Pipeline
+//!
+//! 1. **Indexing**: Load FASTA genomes → 2-bit encode → Build FM-index (SA-IS)
+//! 2. **Filtering**: Find top-N rarest k-mers as anchors → backward search for candidates
+//! 3. **Alignment**: Score candidates via XOR/SW/Myers → reverse complement → rank
+//!
+//! # Example
+//!
+//! ```
+//! use bit_pop::BitPop;
+//!
+//! // Create indexer with k-mer size 10
+//! let mut bp = BitPop::new(10);
+//!
+//! // Add reference genomes
+//! bp.add_genome("Ecoli_K12", "AGCTAGCTAGCT...");
+//! bp.add_genome("Staph_aureus", "GCTAGCTAGCTA...");
+//!
+//! // Build the FM-index (must call before mapping)
+//! bp.build();
+//!
+//! // Map a read (returns ranked results)
+//! let results = bp.map_read("AGCTAGCTAGCTAGCT", 10);
+//!
+//! for result in &results {
+//!     let name = bp.genome_name(result.genome_id).unwrap();
+//!     println!("{} → {} (score: {:.2})", result.genome_id, name, result.score);
+//! }
+//! ```
+//!
+//! # Parallel Mapping
+//!
+//! ```no_run
+//! use bit_pop::BitPop;
+//!
+//! let mut bp = BitPop::new(10);
+//! bp.add_genome("genome1", "AGCT...");
+//! bp.build();
+//!
+//! // Map many reads in parallel
+//! let reads = vec![
+//!     ("read1", "AGCTAGCTAGCT"),
+//!     ("read2", "GCTAGCTAGCTA"),
+//! ];
+//! let mapped = bp.map_reads_parallel(&reads, "output.sam", 10).unwrap();
+//! println!("Mapped {} reads", mapped);
+//! ```
+//!
+//! # Persistence
+//!
+//! ```no_run
+//! use bit_pop::BitPop;
+//!
+//! let mut bp = BitPop::new(10);
+//! bp.add_genome("genome1", "AGCT...");
+//! bp.build();
+//!
+//! // Save to disk
+//! bp.serialize_to_file("index.bitpop").unwrap();
+//!
+//! // Load from disk (< 10ms with memmap)
+//! let loaded = BitPop::deserialize_from_file("index.bitpop").unwrap();
+//! let results = loaded.map_read("AGCTAGCTAGCT", 10);
+//! ```
+//!
+//! # DNA Encoding
+//!
+//! All sequences are stored as 2-bit encoded bytes (A=1, C=2, G=3, T=4).
+//! Unknown bases (N) are skipped during encoding.
+//!
+//! ```
+//! use bit_pop::{encode_sequence, decode_sequence, encode_kmer, decode_kmer};
+//!
+//! let seq = "ACGTACGT";
+//! let encoded = encode_sequence(seq);
+//! assert_eq!(decode_sequence(&encoded), seq.replace('N', ""));
+//!
+//! let kmer = encode_kmer("ACGT").unwrap();
+//! assert_eq!(decode_kmer(kmer, 4), "ACGT");
+//! ```
+
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::manual_is_multiple_of)]
+#![allow(clippy::type_complexity)]
+
 pub mod delta;
 pub mod fm;
 pub mod align;
@@ -16,7 +107,7 @@ use std::fmt;
 use std::collections::HashMap;
 use std::io;
 
-use fm::{FmIndex, SpacedSeed};
+use fm::FmIndex;
 use rayon::prelude::*;
 
 /// Default threshold for filtering repetitive k-mers.
@@ -49,10 +140,12 @@ pub fn decode_base(val: u8) -> char {
     }
 }
 
+type PairedReads = (String, String, Vec<u8>, String, Vec<u8>);
+
 /// Encode a DNA sequence into a compact byte slice (2 bits per base).
 /// Skips unknown bases (N).
 pub fn encode_sequence(seq: &str) -> Vec<u8> {
-    seq.chars().filter_map(|c| encode_base(c)).collect()
+    seq.chars().filter_map(encode_base).collect()
 }
 
 /// Decode a compact byte slice back to a DNA string.
@@ -193,6 +286,12 @@ pub struct InsertSizeStats {
     pub count: usize,
 }
 
+impl Default for InsertSizeStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl InsertSizeStats {
     pub fn new() -> Self {
         Self { mean: 0.0, stddev: 0.0, count: 0 }
@@ -280,15 +379,42 @@ impl fmt::Display for AlignMode {
 
 // --- BitPop (main struct) ---
 
-/// Bit-Pop genomic mapper.
+/// Bit-Pop multi-genome DNA read mapper.
 ///
-/// 3-stage pipeline:
-/// 1. K-mer inverted index → candidate positions
-/// 2. Bit-level alignment → precise matches
-/// 3. Multi-genome ranking → scored results
+/// Implements a 3-stage pipeline:
+/// 1. **K-mer inverted index** → candidate positions via FM-index backward search
+/// 2. **Bit-level alignment** → precise matches via XOR/SW/Myers algorithms
+/// 3. **Multi-genome ranking** → scored results combining alignment and k-mer rarity
 ///
-/// After adding all genomes, call `build()` to compress the k-mer index.
-/// Compression reduces memory by ~60-70% and improves cache performance.
+/// # Usage
+///
+/// ```
+/// use bit_pop::{BitPop, AlignMode};
+///
+/// let mut bp = BitPop::new(10);
+/// bp.add_genome("Ecoli", "AGCTAGCTAGCTAGCTAGCT");
+/// bp.add_genome("Staph", "GCTAGCTAGCTAGCTAGCTA");
+/// bp.build();
+///
+/// // Map a read
+/// let results = bp.map_read("AGCTAGCTAGCTAGCT", 10);
+/// assert!(!results.is_empty());
+///
+/// // With custom alignment mode
+/// let results = bp.map_read_with_mode("AGCTAGCTAGCTAGCT", AlignMode::Hybrid, 10);
+/// ```
+///
+/// # Configuration
+///
+/// - `set_auto_k(true)` — auto-scale k-mer size based on genome size
+/// - `set_top_n(3)` — try top-3 rarest k-mers as anchors (better mapping rate, slower)
+/// - `set_spaced_seed(true)` — use spaced seed pattern for error-prone reads
+/// - `set_read_type("long")` — for Nanopore/PacBio reads (k clamped to [13,19])
+///
+/// # Persistence
+///
+/// Save and load indexes with `serialize_to_file()` / `deserialize_from_file()`.
+/// The persisted format uses memmap2 for <10ms load time and zstd compression.
 pub struct BitPop {
     /// FM-index (built on demand via `build()`)
     fm_index: Option<FmIndex>,
@@ -320,7 +446,20 @@ pub struct BitPop {
 
 impl BitPop {
     /// Create a new Bit-Pop indexer with the given k-mer size.
-    /// Recommended: k=15 for short reads, k=20 for long reads.
+    ///
+    /// # Arguments
+    /// * `_k` — K-mer size. Recommended: k=10 for short reads (Illumina),
+    ///   k=15 for long reads (Nanopore/PacBio). Use `set_auto_k(true)` to
+    ///   compute optimal k automatically.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use bit_pop::BitPop;
+    /// let mut bp = BitPop::new(10);
+    /// bp.set_auto_k(true);
+    /// bp.set_top_n(3);
+    /// ```
     pub fn new(_k: usize) -> Self {
         Self {
             fm_index: None,
@@ -397,9 +536,22 @@ impl BitPop {
     }
 
     /// Add a genome (reference sequence) to the index.
-    /// Returns the assigned genome_id.
     ///
+    /// Returns the assigned genome_id (0-based, sequential).
     /// After adding all genomes, call `build()` to construct the FM-index.
+    ///
+    /// # Arguments
+    /// * `name` — Genome identifier (e.g., "Ecoli_K12", "NC_000913.3")
+    /// * `sequence` — DNA sequence in FASTA format (any case, N bases skipped)
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use bit_pop::BitPop;
+    /// let mut bp = BitPop::new(10);
+    /// let id = bp.add_genome("test", "ACGTACGTACGT");
+    /// assert_eq!(id, 0);
+    /// ```
     pub fn add_genome(&mut self, name: &str, sequence: &str) -> u32 {
         let genome_id = self.genomes.len() as u32;
         let encoded = encode_sequence(sequence);
@@ -408,8 +560,21 @@ impl BitPop {
         genome_id
     }
 
-     /// Finalize the index: construct the FM-index from all stored genomes.
-    /// After build, the index is immutable.
+    /// Finalize the index: construct the FM-index from all stored genomes.
+    ///
+    /// After `build()`, the index is immutable and ready for mapping.
+    /// Recomputes k-mer size if `auto_k` is enabled.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use bit_pop::BitPop;
+    /// let mut bp = BitPop::new(10);
+    /// bp.add_genome("g1", "ACGTACGT");
+    /// bp.add_genome("g2", "GCTAGCTA");
+    /// bp.build();
+    /// assert_eq!(bp.genome_count(), 2);
+    /// ```
     pub fn build(&mut self) {
         self.recompute_k();
 
@@ -484,6 +649,7 @@ impl BitPop {
     }
 
     /// Encode k bytes (each 2 bits) into a u64 k-mer value.
+    #[allow(dead_code)]
     fn encode_kmer_bytes(&self, bytes: &[u8]) -> u64 {
         let mut result: u64 = 0;
         for &b in bytes {
@@ -493,7 +659,15 @@ impl BitPop {
     }
 
     /// Stage 1: K-mer filter for a read.
+    ///
     /// Returns candidate positions across all genomes using FM-index backward search.
+    /// No threshold applied (equivalent to `kmer_filter_with_threshold(read, usize::MAX)`).
+    ///
+    /// # Arguments
+    /// * `read` — DNA read sequence
+    ///
+    /// # Returns
+    /// Vector of (genome_id, position, kmer_count) tuples sorted by descending count.
     pub fn kmer_filter(&self, read: &str) -> Vec<(u32, u64, usize)> {
         self.kmer_filter_with_threshold(read, usize::MAX)
     }
@@ -544,7 +718,7 @@ impl BitPop {
                 }
             }
 
-            let positions = fm.find_positions(kmer, max_hits.min(usize::MAX));
+            let positions = fm.find_positions(kmer, max_hits);
             for &(gid, pos) in &positions {
                 let packed = ((gid as u64) << 32) | (pos & 0xFFFFFFFF);
                 *counts.entry(packed).or_default() += 1;
@@ -559,7 +733,7 @@ impl BitPop {
                 (genome_id, position, count)
             })
             .collect();
-        candidates.sort_by(|a, b| b.2.cmp(&a.2));
+        candidates.sort_by_key(|b| std::cmp::Reverse(b.2));
         candidates
     }
 
@@ -592,7 +766,7 @@ impl BitPop {
                 }
             }
 
-            let positions = fm.find_positions(kmer, max_hits.min(usize::MAX));
+            let positions = fm.find_positions(kmer, max_hits);
             for &(gid, pos) in &positions {
                 let packed = ((gid as u64) << 32) | (pos & 0xFFFFFFFF);
                 *counts.entry(packed).or_default() += 1;
@@ -607,7 +781,7 @@ impl BitPop {
                 (genome_id, position, count)
             })
             .collect();
-        candidates.sort_by(|a, b| b.2.cmp(&a.2));
+        candidates.sort_by_key(|b| std::cmp::Reverse(b.2));
         candidates
     }
 
@@ -644,11 +818,7 @@ impl BitPop {
 
         // For reads >31bp: chunked 2-bit XOR
         let (score, offset) = align::two_bit_score_chunks(&read_enc, region);
-        let cigar = if score >= 1.0 {
-            format!("{}M", read_len)
-        } else {
-            format!("{}M", read_len)
-        };
+        let cigar = format!("{}M", read_len);
         (score, cigar, offset)
     }
 
@@ -687,7 +857,7 @@ impl BitPop {
             }
             // Normalize score to 0-1 range (max possible = 2 * read_len for match=+2)
             let normalized = (sw_score as f64) / (2.0 * read_len as f64);
-            (normalized.min(1.0).max(0.0), cigar, region_start)
+            (normalized.clamp(0.0, 1.0), cigar, region_start)
         } else {
             // For longer reads: chunked SW with full traceback → real CIGAR
             let (sw_score, cigar) = align::smith_waterman_chunked(&read_enc, region);
@@ -696,7 +866,7 @@ impl BitPop {
                 (score, format!("{}M", read_len), region_start + offset)
             } else {
                 let normalized = (sw_score as f64) / (2.0 * read_len as f64);
-                (normalized.min(1.0).max(0.0), cigar, region_start)
+                (normalized.clamp(0.0, 1.0), cigar, region_start)
             }
         }
     }
@@ -743,7 +913,7 @@ impl BitPop {
                 return (0.0, String::new(), 0, 0.0);
             }
             let normalized = (sw_score as f64) / (2.0 * read_len as f64);
-            (normalized.min(1.0).max(0.0), cigar, offset, qual_penalty)
+            (normalized.clamp(0.0, 1.0), cigar, offset, qual_penalty)
         } else {
             // For longer reads: chunked quality-aware SW with traceback → real CIGAR
             let mut total_score = 0i32;
@@ -785,7 +955,7 @@ impl BitPop {
 
             let cigar = align::build_cigar_string(&all_ops);
             let normalized = (total_score as f64) / (2.0 * read_len as f64);
-            (normalized.min(1.0).max(0.0), cigar, region_start, total_penalty)
+            (normalized.clamp(0.0, 1.0), cigar, region_start, total_penalty)
         }
     }
 
@@ -952,7 +1122,7 @@ impl BitPop {
             0.0
         };
 
-        (base_threshold + length_factor + qual_factor).max(0.3f64).min(0.8f64)
+        (base_threshold + length_factor + qual_factor).clamp(0.3f64, 0.8f64)
     }
 
     /// Find the top-N rarest k-mers in a read, sorted by ascending occurrence count.
@@ -1063,22 +1233,39 @@ impl BitPop {
         candidates
     }
 
-    /// Anchor-based filter: replaces k-mer co-occurrence counting with
-    /// rarest-k-mer anchor + 2-bit XOR scoring.
+    /// Anchor-based filter using the rarest k-mer + 2-bit XOR scoring.
     ///
     /// Algorithm:
     /// 1. Find the rarest k-mer in the read (fewest total positions across all genomes)
     /// 2. Get all positions for that anchor k-mer via FM-index backward search
     /// 3. For each position: 2-bit XOR score the entire read against the genome region
-    /// 4. Return positions with score >= threshold
+    /// 4. Return positions with score >= min_score
     ///
     /// This is O(anchor_positions * read_length/31) vs O(total_kmer_hits) for kmer_filter.
+    ///
+    /// # Arguments
+    /// * `read` — DNA read sequence
+    /// * `min_score` — Minimum alignment score (0.0-1.0)
+    ///
+    /// # Returns
+    /// Vector of (genome_id, position, score, cigar) tuples sorted by descending score.
     pub fn anchor_filter(&self, read: &str, min_score: f64) -> Vec<(u32, u64, f64, String)> {
         self.anchor_filter_with_threshold(read, min_score, usize::MAX)
     }
 
-   /// Anchor-based filter with AlignMode support.
+   /// Anchor-based filter with configurable alignment mode.
+    ///
     /// Uses top-N rarest k-mers as anchors for error tolerance.
+    /// Supports XOR, Smith-Waterman, and Hybrid alignment modes.
+    ///
+    /// # Arguments
+    /// * `read` — DNA read sequence
+    /// * `mode` — Alignment mode: `Xor` (fast), `Sw` (accurate), `Hybrid` (balanced)
+    /// * `min_score` — Minimum alignment score (0.0-1.0)
+    /// * `max_hits` — Maximum k-mer occurrences to consider (repetitive filter)
+    ///
+    /// # Returns
+    /// Vector of (genome_id, position, score, cigar) tuples sorted by descending score.
     pub fn anchor_filter_with_mode(
         &self,
         read: &str,
@@ -1169,12 +1356,12 @@ impl BitPop {
                                 let (sw_score, cigar) = align::smith_waterman(&encoded, candidate_region);
                                 if sw_score == 0 { continue; }
                                 let normalized = (sw_score as f64) / (2.0 * read_len as f64);
-                                (normalized.min(1.0).max(0.0), cigar, candidate_start)
+                                (normalized.clamp(0.0, 1.0), cigar, candidate_start)
                             } else {
                                 let (sw_score, cigar) = align::smith_waterman_chunked(&encoded, candidate_region);
                                 if sw_score == 0 { continue; }
                                 let normalized = (sw_score as f64) / (2.0 * read_len as f64);
-                                (normalized.min(1.0).max(0.0), cigar, candidate_start)
+                                (normalized.clamp(0.0, 1.0), cigar, candidate_start)
                             }
                         }
                         AlignMode::Hybrid => {
@@ -1214,7 +1401,7 @@ impl BitPop {
                 }
 
                 if best_score >= min_score {
-                    scored.push((genome_id, best_offset as u64, best_score.max(0.0).min(1.0), best_cigar));
+                    scored.push((genome_id, best_offset as u64, best_score.clamp(0.0, 1.0), best_cigar));
                 }
             }
         }
@@ -1465,7 +1652,7 @@ impl BitPop {
                     let (score, cigar, _, penalty) = align::two_bit_align_with_quality(&encoded, region, qual_slice);
                     
                     if score >= min_score {
-                        let actual_pos = (estimated_start + 0) as u64;
+                        let actual_pos = (estimated_start) as u64;
                         scored.push((genome_id, actual_pos, score, cigar, penalty));
                     }
                     continue;
@@ -1533,7 +1720,7 @@ impl BitPop {
                             _ => 'S',
                         });
                     }
-                    scored.push((genome_id, best_offset as u64, best_score.max(0.0).min(1.0), cigar, best_penalty));
+                    scored.push((genome_id, best_offset as u64, best_score.clamp(0.0, 1.0), cigar, best_penalty));
                 }
             }
         }
@@ -1577,7 +1764,7 @@ impl BitPop {
             };
 
             let combined_score = align_score * 0.85 + rarity * 0.15;
-            let adjusted_score = (align_score + quality_penalty).max(0.0).min(1.0);
+            let adjusted_score = (align_score + quality_penalty).clamp(0.0, 1.0);
             
             let read_len = encoded.len();
             let context = self.extract_genome_context(genome_id, position, read_len, context_window);
@@ -1619,14 +1806,50 @@ impl BitPop {
     }
 
     /// Full pipeline: map a read to all indexed genomes.
+    ///
     /// Uses anchor-based 2-bit XOR filtering (1 anchor + XOR score).
+    /// Tries both forward and reverse complement strands, returns the best alignment.
+    ///
+    /// # Arguments
+    /// * `read` — DNA read sequence (any case, N bases skipped)
+    /// * `context_window` — Number of flanking bases to include in context string
+    ///
+    /// # Returns
+    /// Ranked `MappingResult` list (best match first). Empty if no match found.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use bit_pop::BitPop;
+    /// let mut bp = BitPop::new(10);
+    /// bp.add_genome("Ecoli", "AGCTAGCTAGCTAGCTAGCTAGCT");
+    /// bp.build();
+    /// let results = bp.map_read("AGCTAGCTAGCTAGCT", 10);
+    /// assert!(!results.is_empty());
+    /// ```
     pub fn map_read(&self, read: &str, context_window: usize) -> Vec<MappingResult> {
         self.map_read_with_mode(read, AlignMode::Xor, context_window)
     }
 
     /// Full pipeline with configurable alignment mode.
+    ///
     /// Uses anchor-based filtering with the specified alignment algorithm.
     /// Tries both forward and reverse complement, returns best alignment.
+    ///
+    /// # Arguments
+    /// * `read` — DNA read sequence
+    /// * `mode` — Alignment mode: `Xor` (fast), `Sw` (accurate), `Hybrid` (balanced)
+    /// * `context_window` — Flanking bases for context string
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use bit_pop::{BitPop, AlignMode};
+    /// let mut bp = BitPop::new(10);
+    /// bp.add_genome("g1", "AGCTAGCTAGCTAGCT");
+    /// bp.build();
+    /// let results = bp.map_read_with_mode("AGCTAGCTAGCT", AlignMode::Hybrid, 10);
+    /// ```
     pub fn map_read_with_mode(&self, read: &str, mode: AlignMode, context_window: usize) -> Vec<MappingResult> {
         let forward_results = self.map_read_orientation(read, mode, context_window, false);
         let rc_read = reverse_complement(read);
@@ -1651,14 +1874,14 @@ impl BitPop {
                     results
                 }
             }
-            (Some(f), None) => {
+            (Some(_f), None) => {
                 let mut results = forward_results;
                 if !results.is_empty() {
                     results[0].is_reverse = false;
                 }
                 results
             }
-            (None, Some(r)) => {
+            (None, Some(_r)) => {
                 let mut results = rc_results;
                 if !results.is_empty() {
                     results[0].is_reverse = true;
@@ -1712,14 +1935,14 @@ impl BitPop {
                     results
                 }
             }
-            (Some(f), None) => {
+            (Some(_f), None) => {
                 let mut results = forward_results;
                 if !results.is_empty() {
                     results[0].is_reverse = false;
                 }
                 results
             }
-            (None, Some(r)) => {
+            (None, Some(_r)) => {
                 let mut results = rc_results;
                 if !results.is_empty() {
                     results[0].is_reverse = true;
@@ -1735,7 +1958,7 @@ impl BitPop {
         &self,
         read: &str,
         quality: &[u8],
-        mode: AlignMode,
+        _mode: AlignMode,
         min_quality: u8,
         context_window: usize,
         _is_rc: bool,
@@ -1766,7 +1989,7 @@ impl BitPop {
             };
 
             let combined_score = align_score * 0.85 + rarity * 0.15;
-            let adjusted_score = (align_score + quality_penalty).max(0.0).min(1.0);
+            let adjusted_score = (align_score + quality_penalty).clamp(0.0, 1.0);
             
             let read_len = encoded.len();
             let context = self.extract_genome_context(genome_id, position, read_len, context_window);
@@ -1854,19 +2077,73 @@ impl BitPop {
     }
 
     /// Serialize and write to a file (persisted format with compression).
+    ///
+    /// Uses format v5 with memmap2 for <10ms load time and zstd compression.
+    ///
+    /// # Arguments
+    /// * `path` — Output file path (e.g., "index.bitpop")
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use bit_pop::BitPop;
+    /// let mut bp = BitPop::new(10);
+    /// bp.add_genome("g1", "ACGT...");
+    /// bp.build();
+    /// bp.serialize_to_file("index.bitpop").unwrap();
+    /// ```
     pub fn serialize_to_file(&self, path: &str) -> io::Result<()> {
         persisted::save_bitpop(self, path)?;
         Ok(())
     }
 
     /// Load a BitPop instance from a file (persisted format).
+    ///
+    /// Auto-detects and loads format v3 (legacy), v4, and v5.
+    /// Format v5 uses memmap2 for <10ms load time.
+    ///
+    /// # Arguments
+    /// * `path` — Input file path (e.g., "index.bitpop")
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use bit_pop::BitPop;
+    /// let bp = BitPop::deserialize_from_file("index.bitpop").unwrap();
+    /// let results = bp.map_read("AGCTAGCTAGCT", 10);
+    /// ```
     pub fn deserialize_from_file(path: &str) -> io::Result<Self> {
         let bp = persisted::load_bitpop(path)?;
         Ok(bp)
     }
 
     /// Map multiple reads in parallel and write results to a SAM file.
-    /// Returns the number of reads that had at least one mapping.
+    ///
+    /// Uses rayon work-stealing scheduler for multi-core parallelism.
+    /// Writes SAM header + all mappings to the output file.
+    ///
+    /// # Arguments
+    /// * `reads` — Slice of (read_name, read_sequence) tuples
+    /// * `output_path` — Output SAM file path
+    /// * `context_window` — Flanking bases for context string
+    ///
+    /// # Returns
+    /// Number of reads that had at least one mapping.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use bit_pop::BitPop;
+    /// let mut bp = BitPop::new(10);
+    /// bp.add_genome("g1", "ACGTACGTACGTACGT");
+    /// bp.build();
+    /// let reads = vec![
+    ///     ("read1", "ACGTACGTACGT"),
+    ///     ("read2", "GTCAGTCAGTCA"),
+    /// ];
+    /// let mapped = bp.map_reads_parallel(&reads, "output.sam", 10).unwrap();
+    /// println!("Mapped {} reads", mapped);
+    /// ```
     pub fn map_reads_parallel(
         &self,
         reads: &[(&str, &str)],
@@ -1908,6 +2185,17 @@ impl BitPop {
     }
 
     /// Map multiple FASTQ reads in parallel with quality-aware scoring and write to SAM.
+    ///
+    /// Reads are filtered by minimum quality, then scored with Phred-scaled penalties.
+    ///
+    /// # Arguments
+    /// * `fastq_path` — Input FASTQ file path
+    /// * `output_path` — Output SAM file path
+    /// * `min_quality` — Minimum Phred quality (0 = no filter)
+    /// * `context_window` — Flanking bases for context string
+    ///
+    /// # Returns
+    /// Number of reads that had at least one mapping.
     pub fn map_reads_from_fastq_parallel(
         &self,
         fastq_path: &str,
@@ -2075,7 +2363,7 @@ impl BitPop {
             }
         }
 
-        if reads.len() % progress_interval != 0 {
+        if !reads.len().is_multiple_of(progress_interval) {
             on_progress(reads.len(), total);
         }
 
@@ -2115,7 +2403,7 @@ impl BitPop {
             .map(|(name, seq)| {
                 let results = self.map_read(seq, context_window);
                 let count = completed.fetch_add(1, Ordering::Relaxed) + 1;
-                if count % progress_interval == 0 || count == total {
+                if count.is_multiple_of(progress_interval) || count == total {
                     if let Ok(mut cb) = progress_callback.lock() {
                         cb(count, total);
                     }
@@ -2145,7 +2433,7 @@ impl BitPop {
     pub fn map_read_paired(
         &self,
         paired: &PairedRead,
-        context_window: usize,
+        _context_window: usize,
     ) -> PairedMappingResult {
         let mut insert_stats = InsertSizeStats::new();
 
@@ -2185,7 +2473,7 @@ impl BitPop {
     /// Map multiple paired-end reads in parallel and write SAM output.
     pub fn map_paired_reads_parallel(
         &self,
-        pairs: &[(String, String, Vec<u8>, String, Vec<u8>)],
+        pairs: &[PairedReads],
         output_path: &str,
         context_window: usize,
     ) -> io::Result<usize> {
@@ -2238,10 +2526,10 @@ impl BitPop {
     /// Map multiple paired-end reads with quality-aware scoring.
     pub fn map_paired_reads_parallel_quality(
         &self,
-        pairs: &[(String, String, Vec<u8>, String, Vec<u8>)],
+        pairs: &[PairedReads],
         output_path: &str,
         min_quality: u8,
-        context_window: usize,
+        _context_window: usize,
     ) -> io::Result<usize> {
         let genomes_owned: Vec<(String, usize)> = (0..self.genome_count() as u32)
             .filter_map(|gid| {
@@ -2333,9 +2621,9 @@ fn compute_tlen(map1: &Option<PairedReadMapping>, map2: &Option<PairedReadMappin
             
             // Sign based on which read is forward/reverse
             if m1.is_reverse {
-                -(tlen as i64)
+                -tlen
             } else {
-                tlen as i64
+                tlen 
             }
         }
         _ => 0,

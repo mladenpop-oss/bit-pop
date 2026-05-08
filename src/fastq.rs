@@ -1,6 +1,8 @@
 use std::fs::File;
 use std::io::{BufRead, BufReader, Result as IoResult};
 
+type ReadPair = (String, String, Vec<u8>, String, Vec<u8>);
+
 /// Parse a FASTQ file and return read names, sequences, and quality scores.
 pub fn parse_fastq(path: &str) -> IoResult<Vec<(String, String, Vec<u8>)>> {
     let file = File::open(path)?;
@@ -58,11 +60,11 @@ pub fn parse_fasta(path: &str) -> IoResult<Vec<(String, String)>> {
     for line in reader.lines() {
         match line {
             Ok(l) => {
-                if l.starts_with('>') {
+                if let Some(stripped) = l.strip_prefix('>') {
                     if !header.is_empty() {
                         reads.push((header.clone(), sequence.clone()));
                     }
-                    header = l[1..].trim().to_string();
+                    header = stripped.trim().to_string();
                     sequence = String::new();
                 } else if !l.trim().is_empty() {
                     sequence.push_str(l.trim());
@@ -113,6 +115,7 @@ impl ReadsFormat {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn iter_fastq(&self) -> Option<Box<dyn Iterator<Item = (&str, &str, &[u8])> + '_>> {
         match self {
             ReadsFormat::Fastq(reads) => Some(Box::new(reads.iter().map(|(name, seq, qual)| (name.as_str(), seq.as_str(), qual.as_slice())))),
@@ -150,9 +153,7 @@ pub fn filter_by_quality(reads: &[(String, String, Vec<u8>)], min_avg_qual: u8) 
 fn normalize_read_name(name: &str) -> String {
     let name = name.trim();
     // Strip common paired-end suffixes: "read/1", "read/2", "read:1", "read:2"
-    let name = if name.ends_with("/1") || name.ends_with("/2") {
-        &name[..name.len() - 2]
-    } else if name.ends_with(":1") || name.ends_with(":2") {
+    let name = if name.ends_with("/1") || name.ends_with("/2") || name.ends_with(":1") || name.ends_with(":2") {
         &name[..name.len() - 2]
     } else {
         name
@@ -161,6 +162,7 @@ fn normalize_read_name(name: &str) -> String {
 }
 
 /// Check if a read name looks like it's from the first or second read in a pair.
+#[allow(dead_code)]
 fn is_read_1(name: &str) -> bool {
     name.ends_with("/1") || name.ends_with(":1")
 }
@@ -172,7 +174,8 @@ fn is_read_2(name: &str) -> bool {
 /// Parse a FASTQ file for paired-end reads and return paired read pairs.
 /// Matches R1/R2 by normalized name (strips /1, /2, :1, :2 suffixes).
 /// Returns Vec of (normalized_name, read1_seq, read1_qual, read2_seq, read2_qual).
-pub fn parse_paired_fastq(path1: &str, path2: &str) -> IoResult<Vec<(String, String, Vec<u8>, String, Vec<u8>)>> {
+#[allow(clippy::type_complexity)]
+pub fn parse_paired_fastq(path1: &str, path2: &str) -> IoResult<Vec<ReadPair>> {
     let reads1 = parse_fastq(path1)?;
     let reads2 = parse_fastq(path2)?;
 
@@ -204,7 +207,8 @@ pub fn parse_paired_fastq(path1: &str, path2: &str) -> IoResult<Vec<(String, Str
 
 /// Parse single FASTQ file and return paired-end reads assuming interleaved format.
 /// In interleaved FASTQ, read1 and read2 alternate: R1, R2, R1, R2, ...
-pub fn parse_interleaved_paired_fastq(path: &str) -> IoResult<Vec<(String, String, Vec<u8>, String, Vec<u8>)>> {
+#[allow(clippy::type_complexity)]
+pub fn parse_interleaved_paired_fastq(path: &str) -> IoResult<Vec<ReadPair>> {
     let reads = parse_fastq(path)?;
 
     if reads.len() % 2 != 0 {
@@ -244,7 +248,7 @@ pub fn phred_mismatch_penalty(read_qual: u8, genome_qual: u8) -> f64 {
     let avg_qual = ((read_qual as f64) + (genome_qual as f64)) / 2.0;
     
     // Scale: Q10 = -1, Q20 = -2, Q30 = -3, Q40 = -4
-    (avg_qual as f64 / 10.0).min(5.0) * -1.0
+    -(avg_qual / 10.0).min(5.0)
 }
 
 #[cfg(test)]

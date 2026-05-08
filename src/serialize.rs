@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use crate::fm::FmIndex;
 use crate::BitPop;
 
+#[allow(dead_code)]
 const SAMPLE_INTERVAL: usize = 32;
 
 // --- Binary Format ---
@@ -32,18 +33,21 @@ const SAMPLE_INTERVAL: usize = 32;
 const MAGIC: &[u8] = b"BITP";
 const VERSION: u32 = 2;
 
+#[allow(dead_code)]
 fn read_u32_le<R: Read>(reader: &mut R) -> IoResult<u32> {
     let mut buf = [0u8; 4];
     reader.read_exact(&mut buf)?;
     Ok(u32::from_le_bytes(buf))
 }
 
+#[allow(dead_code)]
 fn read_u64_le<R: Read>(reader: &mut R) -> IoResult<u64> {
     let mut buf = [0u8; 8];
     reader.read_exact(&mut buf)?;
     Ok(u64::from_le_bytes(buf))
 }
 
+#[allow(dead_code)]
 fn read_u16_le<R: Read>(reader: &mut R) -> IoResult<u16> {
     let mut buf = [0u8; 2];
     reader.read_exact(&mut buf)?;
@@ -66,6 +70,7 @@ fn write_bytes<W: Write>(writer: &mut W, data: &[u8]) -> IoResult<()> {
     writer.write_all(data)
 }
 
+#[allow(dead_code)]
 fn read_bytes<R: Read>(reader: &mut R, len: usize) -> IoResult<Vec<u8>> {
     let mut buf = vec![0u8; len];
     reader.read_exact(&mut buf)?;

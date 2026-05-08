@@ -1,6 +1,5 @@
 /// Multi-genome ranking for mapping results.
 /// Extends vibe-build's Rarity × Proximity to genomic context.
-
 use crate::MappingResult;
 
 /// Rank mapping candidates by combined genomic score.
@@ -78,7 +77,7 @@ pub fn deduplicate(results: Vec<MappingResult>, window: u64) -> Vec<MappingResul
 
     for r in sorted {
         let dominated = used.iter().any(|&(gid, pos)| {
-            gid == r.genome_id && if r.position > pos { r.position - pos } else { pos - r.position } < window
+            gid == r.genome_id && r.position.abs_diff(pos) < window
         });
         if !dominated {
             used.push((r.genome_id, r.position));

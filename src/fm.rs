@@ -3,7 +3,6 @@
 /// Encoding: $=0 (sentinel), A=1, C=2, G=3, T=4
 /// SA construction via libsais (SA-IS, O(n))
 /// Parallel build support via rayon
-
 use libsais::{SuffixArrayConstruction, ThreadCount};
 use rayon::prelude::*;
 
@@ -106,7 +105,7 @@ fn build_bwt_from_sa_parallel(sa: &[usize], s: &[u8], num_threads: usize) -> Vec
     if n == 0 { return vec![]; }
     if n == 1 { return vec![s[0]]; }
 
-    let chunk_size = (n + num_threads - 1) / num_threads;
+    let chunk_size = n.div_ceil(num_threads);
     let num_chunks = ((n - 1) / chunk_size) + 1;
 
     let bwt_chunks: Vec<Vec<u8>> = (0..num_chunks)
@@ -135,7 +134,7 @@ pub struct OccCounter {
 impl OccCounter {
     pub fn new(bwt: &[u8], sample_interval: usize) -> Self {
         let len = bwt.len();
-        let num_samples = (len + sample_interval - 1) / sample_interval;
+        let num_samples = len.div_ceil(sample_interval);
         let mut samples: Vec<[u32; ALPHABET_SIZE]> = vec![[0; ALPHABET_SIZE]; num_samples];
         let mut counts = [0u32; ALPHABET_SIZE];
         
@@ -147,7 +146,7 @@ impl OccCounter {
                 if idx < num_samples { samples[idx] = counts; }
             }
         }
-        if len % sample_interval != 0 {
+        if !len.is_multiple_of(sample_interval) {
             samples[num_samples - 1] = counts;
         }
         
@@ -163,7 +162,7 @@ impl OccCounter {
             };
         }
 
-        let num_samples = (len + sample_interval - 1) / sample_interval;
+        let num_samples = len.div_ceil(sample_interval);
         let mut samples: Vec<[u32; ALPHABET_SIZE]> = vec![[0; ALPHABET_SIZE]; num_samples];
         let mut counts = [0u32; ALPHABET_SIZE];
 
@@ -175,7 +174,7 @@ impl OccCounter {
                 if idx < num_samples { samples[idx] = counts; }
             }
         }
-        if len % sample_interval != 0 {
+        if !len.is_multiple_of(sample_interval) {
             samples[num_samples - 1] = counts;
         }
 
@@ -194,13 +193,13 @@ impl OccCounter {
         let base = self.samples[idx][ci] as u64;
         
         if sample_end == i {
-            return base;
+            base
         } else if sample_end > i {
             let excess: u64 = bwt[i..sample_end].iter().filter(|&&x| x == c).count() as u64;
-            return base - excess;
+            base - excess
         } else {
             let extra: u64 = bwt[sample_end..i].iter().filter(|&&x| x == c).count() as u64;
-            return base + extra;
+            base + extra
         }
     }
 }
@@ -225,6 +224,10 @@ impl SpacedSeed {
 
     pub fn len(&self) -> usize {
         self.pattern.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pattern.is_empty()
     }
 
     pub fn coverage(&self) -> f64 {
@@ -269,7 +272,7 @@ impl FmIndex {
             let start = s.len();
             for &byte in *seq {
                 // Input bytes should be 1-4 (A=1, C=2, G=3, T=4)
-                if byte >= 1 && byte <= 4 { s.push(byte); }
+                if (1..=4).contains(&byte) { s.push(byte); }
             }
             let gid_u32 = gid as u32;
             if gid_u32 < (genomes.len() - 1) as u32 {
@@ -283,7 +286,7 @@ impl FmIndex {
         let bwt = build_bwt_from_sa(&sa, &s);
         
         // C-array: C[c] = number of chars < c in BWT
-        let mut counts = vec![0usize; ALPHABET_SIZE];
+        let mut counts = [0usize; ALPHABET_SIZE];
         for &c in bwt.iter() {
             let ci = c as usize;
             if ci < ALPHABET_SIZE { counts[ci] += 1; }
@@ -310,7 +313,7 @@ impl FmIndex {
         for (gid, (_, seq)) in genomes.iter().enumerate() {
             let start = s.len();
             for &byte in *seq {
-                if byte >= 1 && byte <= 4 { s.push(byte); }
+                if (1..=4).contains(&byte) { s.push(byte); }
             }
             let gid_u32 = gid as u32;
             if gid_u32 < (genomes.len() - 1) as u32 {
@@ -324,7 +327,7 @@ impl FmIndex {
         let sa = build_suffix_array(&s);
         let bwt = build_bwt_from_sa_parallel(&sa, &s, num_threads);
         
-        let mut counts = vec![0usize; ALPHABET_SIZE];
+        let mut counts = [0usize; ALPHABET_SIZE];
         for &c in bwt.iter() {
             let ci = c as usize;
             if ci < ALPHABET_SIZE { counts[ci] += 1; }

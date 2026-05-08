@@ -9,7 +9,7 @@
 ///   If continuation bit is 1, more bytes follow.
 ///   Example: 300 = 0b100101101 → split into 7-bit groups → 0b00010 0b0101101
 ///   Encoded as: 0x32 0x2D (continuation=1 on first byte)
-
+///
 /// Encode a u64 into VLI format. Returns bytes in MSB-first order.
 /// Uses 7-bit groups, max 10 bytes for u64.
 pub fn vli_encode_u64(value: u64) -> Vec<u8> {
@@ -162,7 +162,7 @@ pub fn compress_positions_blocked_u64(
     }
 
     let total = positions.len();
-    let num_blocks = (total + block_size - 1) / block_size;
+    let num_blocks = total.div_ceil(block_size);
     let mut skip_offsets = Vec::with_capacity(num_blocks);
     let mut data = Vec::new();
 
@@ -616,7 +616,7 @@ pub fn compress_positions_blocked(positions: &[u32], block_size: usize) -> Block
         };
     }
 
-    let num_blocks = (positions.len() + block_size - 1) / block_size;
+    let num_blocks = positions.len().div_ceil(block_size);
     let mut skip_offsets = Vec::with_capacity(num_blocks);
     let mut data = Vec::new();
 

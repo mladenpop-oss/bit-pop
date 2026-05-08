@@ -231,7 +231,7 @@ impl DynamicIndexManager {
 
     pub fn save_index(&self, bp: &BitPop) -> io::Result<()> {
         bp.serialize_to_file(self.index_path.to_str().unwrap())
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+            .map_err(io::Error::other)
     }
 
     pub fn list_genomes(&self) -> Vec<(&u32, &GenomeEntry)> {
@@ -243,25 +243,22 @@ impl DynamicIndexManager {
     pub async fn check_for_updates(&mut self, client: &mut NcbiClient) -> Vec<String> {
         let mut updated = Vec::new();
 
-        for (gid, genome) in self.list_genomes() {
+        for (_gid, genome) in self.list_genomes() {
             if let Some(ref acc) = genome.accession {
-                match client.fetch_by_accession_version(acc).await {
-                    Ok(fasta) => {
-                        let current_checksum = CacheManifest::compute_checksum(
-                            Path::new(genome.local_path.as_deref().unwrap_or(""))
-                        ).unwrap_or_default();
+                if let Ok(fasta) = client.fetch_by_accession_version(acc).await {
+                    let current_checksum = CacheManifest::compute_checksum(
+                        Path::new(genome.local_path.as_deref().unwrap_or(""))
+                    ).unwrap_or_default();
 
-                        let new_checksum = {
-                            let mut hasher = Sha256::new();
-                            hasher.update(fasta.as_bytes());
-                            format!("{:x}", hasher.finalize())
-                        };
+                    let new_checksum = {
+                        let mut hasher = Sha256::new();
+                        hasher.update(fasta.as_bytes());
+                        format!("{:x}", hasher.finalize())
+                    };
 
-                        if current_checksum != new_checksum {
-                            updated.push(acc.clone());
-                        }
+                    if current_checksum != new_checksum {
+                        updated.push(acc.clone());
                     }
-                    Err(_) => {}
                 }
             }
         }

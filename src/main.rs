@@ -7,7 +7,6 @@ use bit_pop::{BitPop, AlignMode};
 use bit_pop::fastq::{parse_reads, ReadsFormat};
 use bit_pop::ncbi::{NcbiClient, NcbiConfig};
 use bit_pop::cache::CacheManager;
-use bit_pop::index_manager::DynamicIndexManager;
 
 #[derive(Parser)]
 #[command(name = "bit-pop", about = "Multi-genome DNA read mapper", long_about = None)]
@@ -829,8 +828,8 @@ fn cmd_stats(args: &StatsArgs, _verbose: bool) {
     }
 }
 
-async fn cmd_search(args: &SearchArgs, verbose: bool) {
-    let start = Instant::now();
+async fn cmd_search(args: &SearchArgs, _verbose: bool) {
+    let _start = Instant::now();
 
     let mut config = NcbiConfig::new();
     if let Some(ref key) = args.api_key {
@@ -862,7 +861,7 @@ async fn cmd_search(args: &SearchArgs, verbose: bool) {
 
     let display_count = result.idlist.len().min(args.max_results);
     println!("\nTop {} results:", display_count);
-    println!("{:<25} {:<50} {:<10} {}", "Accession", "Description", "Length", "Type");
+    println!("{:<25} {:<50} {:<10} Type", "Accession", "Description", "Length");
     println!("{:-<100}", "");
 
     if result.idlist.len() > display_count {
@@ -901,7 +900,7 @@ async fn cmd_search(args: &SearchArgs, verbose: bool) {
             let title = ds.title.as_deref().unwrap_or("N/A");
             let pavg = ds.pavg.as_deref().unwrap_or("?");
             let title_display = title.chars().take(50).collect::<String>();
-            println!("{:<25} {:<50} {:<10} {}", accession, title_display, pavg, "-");
+            println!("{:<25} {:<50} {:<10} -", accession, title_display, pavg);
         }
     } else {
         for ds in &filtered {
@@ -909,12 +908,12 @@ async fn cmd_search(args: &SearchArgs, verbose: bool) {
             let title = ds.title.as_deref().unwrap_or("N/A");
             let pavg = ds.pavg.as_deref().unwrap_or("?");
             let title_display = title.chars().take(50).collect::<String>();
-            println!("{:<25} {:<50} {:<10} {}", accession, title_display, pavg, "RefSeq");
+            println!("{:<25} {:<50} {:<10} RefSeq", accession, title_display, pavg);
         }
     }
 }
 
-async fn cmd_fetch(args: &FetchArgs, verbose: bool) -> Result<(), String> {
+async fn cmd_fetch(args: &FetchArgs, _verbose: bool) -> Result<(), String> {
     let start = Instant::now();
 
     let mut config = NcbiConfig::new();
@@ -962,7 +961,7 @@ async fn cmd_fetch(args: &FetchArgs, verbose: bool) -> Result<(), String> {
         }
 
         let result = if cache.has_sequence(accession) {
-            let genome = cache.manifest().get(accession).unwrap();
+            let _genome = cache.manifest().get(accession).unwrap();
             let path = cache.get_fasta_path(accession);
             Some(path)
         } else {
@@ -1008,7 +1007,7 @@ async fn cmd_fetch(args: &FetchArgs, verbose: bool) -> Result<(), String> {
             Ok(_) => {
                 let file_size = std::fs::metadata(&args.output).map(|m| m.len()).unwrap_or(0);
                 for (name, _) in &genomes {
-                    if let Some(genome) = cache.manifest().get(name) {
+                    if let Some(_genome) = cache.manifest().get(name) {
                         let _ = cache.cache_index(name, &args.output, args.k);
                     }
                 }
@@ -1039,7 +1038,7 @@ async fn cmd_fetch(args: &FetchArgs, verbose: bool) -> Result<(), String> {
     Ok(())
 }
 
-async fn cmd_update(args: &UpdateArgs, verbose: bool) -> Result<(), String> {
+async fn cmd_update(args: &UpdateArgs, _verbose: bool) -> Result<(), String> {
     let start = Instant::now();
 
     let mut config = NcbiConfig::new();
@@ -1138,7 +1137,7 @@ fn find_or_build_index(genome_paths: &[PathBuf], k: usize, auto_k: bool, force: 
         let index_path = genome_path.with_extension("bitpop");
 
         if !force && index_path.exists() {
-            let genome_hash = sha256_file(genome_path)?;
+            let _genome_hash = sha256_file(genome_path)?;
             let meta = std::fs::metadata(&index_path).map_err(|e| e.to_string())?;
             let index_mtime = meta.modified().map_err(|e| e.to_string())?;
             let genome_mtime = std::fs::metadata(genome_path).map_err(|e| e.to_string())?.modified().map_err(|e| e.to_string())?;
@@ -1377,7 +1376,7 @@ async fn cmd_run(args: &RunArgs) -> Result<(), String> {
     let step_map = if use_index { 2 } else { 3 };
     println!("\n[{}] Mapping reads...", step_map);
 
-    let mapped_count = if let (Some(r1_path), Some(r2_path)) = (&args.reads_1, &args.reads_2) {
+    let _mapped_count = if let (Some(r1_path), Some(r2_path)) = (&args.reads_1, &args.reads_2) {
         // Paired-end mode
         println!("  Paired-end mode");
         println!("    R1: {}", r1_path.display());

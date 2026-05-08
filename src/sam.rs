@@ -243,8 +243,8 @@ impl SamWriter {
 
                 writeln!(
                     self.file,
-                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t*",
-                    read_name, flag2, mate_name, pos2, mapq2, map2.cigar, "*", 0, 0, ""
+                    "{}\t{}\t{}\t{}\t{}\t{}\t*\t{}\t{}\t\t*",
+                    read_name, flag2, mate_name, pos2, mapq2, map2.cigar, 0, 0
                 )?;
             }
             (Some(map1), None) => {

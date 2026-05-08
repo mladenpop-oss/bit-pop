@@ -27,6 +27,7 @@ impl FastaReader {
     /// Read the next (header, sequence) pair from the FASTA file.
     /// Header is everything after '>' on the header line (trimmed).
     /// Sequence is all subsequent non-header lines joined together (uppercased).
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<io::Result<(String, String)>> {
         // Use lookahead if available
         let first_line = if let Some(line) = self.lookahead.take() {
