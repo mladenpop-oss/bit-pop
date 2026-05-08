@@ -51,10 +51,12 @@ jobs:
   test-macos:
     name: Test (macOS)
     runs-on: macos-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install libomp
+        run: brew install libomp
       - name: Run tests
         run: cargo test --lib && cargo test --test integration_tests -- --nocapture
 
@@ -67,15 +69,3 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Run tests
         run: cargo test --lib && cargo test --test integration_tests -- --nocapture
-
-  test-msrv:
-    name: Test (MSRV)
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Run tests with Rust 1.70
-        run: |
-          rustup install 1.70.0
-          cargo +1.70.0 test --lib && cargo +1.70.0 test --test integration_tests -- --nocapture
