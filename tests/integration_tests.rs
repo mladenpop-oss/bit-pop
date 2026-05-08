@@ -34,7 +34,9 @@ fn test_build_single_genome_index() {
 #[test]
 fn test_map_reads_to_sam() {
     let genome_path = test_data_dir().join("genomes").join("Ecoli_K12_MG1655.fna");
-    let reads_path = test_data_dir().join("reads").join("simulated_ecoli_10k_new.fastq");
+    let _reads_path = test_data_dir()
+        .join("reads")
+        .join("simulated_ecoli_10k_new.fastq");
     let index_path = temp_dir("test_map_reads").join("test_index.bitpop");
     let sam_path = temp_dir("test_map_reads").join("test_output.sam");
 
@@ -47,9 +49,11 @@ fn test_map_reads_to_sam() {
     // Load and map
     let bp = BitPop::deserialize_from_file(index_path.to_str().unwrap()).unwrap();
     let reads = vec![("test_read", "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT")];
-    let mapped = bp.map_reads_to_sam(&reads, sam_path.to_str().unwrap(), 50).unwrap();
+    let mapped = bp
+        .map_reads_to_sam(&reads, sam_path.to_str().unwrap(), 50)
+        .unwrap();
 
-    assert!(mapped >= 0);
+    assert!(mapped > 0);
     assert!(sam_path.exists());
 
     let content = fs::read_to_string(&sam_path).unwrap();
@@ -65,7 +69,11 @@ fn test_multi_genome_index() {
     let mut bp = BitPop::new(10);
     for entry in fs::read_dir(genomes_dir).unwrap() {
         let path = entry.unwrap().path();
-        if path.extension().map(|e| e == "fna" || e == "fasta").unwrap_or(false) {
+        if path
+            .extension()
+            .map(|e| e == "fna" || e == "fasta")
+            .unwrap_or(false)
+        {
             bp.load_genome_fasta(path.to_str().unwrap()).unwrap();
         }
     }
@@ -93,7 +101,8 @@ fn test_sam_output_format() {
         ("read1", "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"),
         ("read2", "TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA"),
     ];
-    bp.map_reads_to_sam(&reads, sam_path.to_str().unwrap(), 50).unwrap();
+    bp.map_reads_to_sam(&reads, sam_path.to_str().unwrap(), 50)
+        .unwrap();
 
     let content = fs::read_to_string(&sam_path).unwrap();
     let lines: Vec<&str> = content.lines().collect();
@@ -102,7 +111,10 @@ fn test_sam_output_format() {
     assert!(lines[0].starts_with("@SQ"));
     // Second line is either @SQ (another genome) or a data line
     let first_data_line = lines.iter().find(|l| !l.starts_with('@') && !l.is_empty());
-    assert!(first_data_line.is_some(), "SAM should have at least one data line");
+    assert!(
+        first_data_line.is_some(),
+        "SAM should have at least one data line"
+    );
 
     // Check data lines have tab-separated fields
     for line in lines.iter().skip(2) {
@@ -110,7 +122,11 @@ fn test_sam_output_format() {
             continue;
         }
         let fields: Vec<&str> = line.split('\t').collect();
-        assert!(fields.len() >= 11, "SAM line should have 11+ fields: {:?}", fields);
+        assert!(
+            fields.len() >= 11,
+            "SAM line should have 11+ fields: {:?}",
+            fields
+        );
     }
 }
 
@@ -121,7 +137,8 @@ fn test_cache_reuse() {
 
     // Build and save
     let mut bp1 = BitPop::new(10);
-    bp1.load_genome_fasta(genome_path.to_str().unwrap()).unwrap();
+    bp1.load_genome_fasta(genome_path.to_str().unwrap())
+        .unwrap();
     bp1.build();
     bp1.serialize_to_file(index_path.to_str().unwrap()).unwrap();
 

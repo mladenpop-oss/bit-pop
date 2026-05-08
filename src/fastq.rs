@@ -38,10 +38,7 @@ pub fn parse_fastq(path: &str) -> IoResult<Vec<(String, String, Vec<u8>)>> {
         };
 
         // Phred+33 encoding: quality byte = ascii_code - 33
-        let quality: Vec<u8> = qual_line
-            .bytes()
-            .map(|b| b.saturating_sub(33))
-            .collect();
+        let quality: Vec<u8> = qual_line.bytes().map(|b| b.saturating_sub(33)).collect();
 
         reads.push((read_name, seq_line, quality));
     }
@@ -84,7 +81,7 @@ pub fn parse_fasta(path: &str) -> IoResult<Vec<(String, String)>> {
 /// Auto-detect file format and parse accordingly.
 pub fn parse_reads(path: &str) -> IoResult<ReadsFormat> {
     let ext = path.to_lowercase();
-    
+
     if ext.ends_with(".fastq") || ext.ends_with(".fq") {
         let reads = parse_fastq(path)?;
         Ok(ReadsFormat::Fastq(reads))
@@ -110,15 +107,27 @@ impl ReadsFormat {
 
     pub fn iter_fasta(&self) -> Box<dyn Iterator<Item = (&str, &str)> + '_> {
         match self {
-            ReadsFormat::Fasta(reads) => Box::new(reads.iter().map(|(name, seq)| (name.as_str(), seq.as_str()))),
-            ReadsFormat::Fastq(reads) => Box::new(reads.iter().map(|(name, seq, _)| (name.as_str(), seq.as_str()))),
+            ReadsFormat::Fasta(reads) => Box::new(
+                reads
+                    .iter()
+                    .map(|(name, seq)| (name.as_str(), seq.as_str())),
+            ),
+            ReadsFormat::Fastq(reads) => Box::new(
+                reads
+                    .iter()
+                    .map(|(name, seq, _)| (name.as_str(), seq.as_str())),
+            ),
         }
     }
 
     #[allow(clippy::type_complexity)]
     pub fn iter_fastq(&self) -> Option<Box<dyn Iterator<Item = (&str, &str, &[u8])> + '_>> {
         match self {
-            ReadsFormat::Fastq(reads) => Some(Box::new(reads.iter().map(|(name, seq, qual)| (name.as_str(), seq.as_str(), qual.as_slice())))),
+            ReadsFormat::Fastq(reads) => {
+                Some(Box::new(reads.iter().map(|(name, seq, qual)| {
+                    (name.as_str(), seq.as_str(), qual.as_slice())
+                })))
+            }
             ReadsFormat::Fasta(_) => None,
         }
     }
@@ -153,7 +162,11 @@ pub fn filter_by_quality(reads: &[(String, String, Vec<u8>)], min_avg_qual: u8) 
 fn normalize_read_name(name: &str) -> String {
     let name = name.trim();
     // Strip common paired-end suffixes: "read/1", "read/2", "read:1", "read:2"
-    let name = if name.ends_with("/1") || name.ends_with("/2") || name.ends_with(":1") || name.ends_with(":2") {
+    let name = if name.ends_with("/1")
+        || name.ends_with("/2")
+        || name.ends_with(":1")
+        || name.ends_with(":2")
+    {
         &name[..name.len() - 2]
     } else {
         name
@@ -196,7 +209,13 @@ pub fn parse_paired_fastq(path1: &str, path2: &str) -> IoResult<Vec<ReadPair>> {
         }
         let norm = normalize_read_name(name);
         if let Some((seq1, qual1)) = map1.get(&norm) {
-            pairs.push((norm.clone(), seq1.clone(), qual1.clone(), seq.clone(), qual.clone()));
+            pairs.push((
+                norm.clone(),
+                seq1.clone(),
+                qual1.clone(),
+                seq.clone(),
+                qual.clone(),
+            ));
         }
     }
 
@@ -227,10 +246,22 @@ pub fn parse_interleaved_paired_fastq(path: &str) -> IoResult<Vec<ReadPair>> {
         let norm2 = normalize_read_name(name2);
 
         if norm1 == norm2 {
-            pairs.push((norm1.clone(), seq1.clone(), qual1.clone(), seq2.clone(), qual2.clone()));
+            pairs.push((
+                norm1.clone(),
+                seq1.clone(),
+                qual1.clone(),
+                seq2.clone(),
+                qual2.clone(),
+            ));
         } else {
             // Different names — treat as unmatched, skip or pair by position
-            pairs.push((format!("unmatched_{}", i), seq1.clone(), qual1.clone(), seq2.clone(), qual2.clone()));
+            pairs.push((
+                format!("unmatched_{}", i),
+                seq1.clone(),
+                qual1.clone(),
+                seq2.clone(),
+                qual2.clone(),
+            ));
         }
         i += 2;
     }
@@ -246,7 +277,7 @@ use std::collections::HashMap;
 pub fn phred_mismatch_penalty(read_qual: u8, genome_qual: u8) -> f64 {
     // Average of read and genome quality (genome qual assumed from reference)
     let avg_qual = ((read_qual as f64) + (genome_qual as f64)) / 2.0;
-    
+
     // Scale: Q10 = -1, Q20 = -2, Q30 = -3, Q40 = -4
     -(avg_qual / 10.0).min(5.0)
 }
@@ -258,8 +289,12 @@ mod tests {
 
     fn make_test_fastq() -> (String, Vec<(String, String, Vec<u8>)>) {
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("test_reads_{}_{}.fastq", std::process::id(), std::time::SystemTime::now().elapsed().unwrap().as_nanos()));
-        
+        let path = dir.join(format!(
+            "test_reads_{}_{}.fastq",
+            std::process::id(),
+            std::time::SystemTime::now().elapsed().unwrap().as_nanos()
+        ));
+
         let mut file = std::fs::File::create(&path).unwrap();
         writeln!(file, "@read1").unwrap();
         writeln!(file, "ACGTACGTACGT").unwrap();
@@ -269,7 +304,7 @@ mod tests {
         writeln!(file, "TTTTGGGGAAAA").unwrap();
         writeln!(file, "+").unwrap();
         writeln!(file, "!!!!!!!!!!!!").unwrap();
-        
+
         let reads = parse_fastq(path.to_str().unwrap()).unwrap();
         (path.to_str().unwrap().to_string(), reads)
     }
@@ -291,14 +326,18 @@ mod tests {
     #[test]
     fn test_parse_fasta() {
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("test_fasta_{}_{}.fasta", std::process::id(), std::time::SystemTime::now().elapsed().unwrap().as_nanos()));
-        
+        let path = dir.join(format!(
+            "test_fasta_{}_{}.fasta",
+            std::process::id(),
+            std::time::SystemTime::now().elapsed().unwrap().as_nanos()
+        ));
+
         let mut file = std::fs::File::create(&path).unwrap();
         writeln!(file, ">read1 description").unwrap();
         writeln!(file, "ACGTACGT").unwrap();
         writeln!(file, ">read2").unwrap();
         writeln!(file, "TTTTGGGG").unwrap();
-        
+
         let reads = parse_fasta(path.to_str().unwrap()).unwrap();
         assert_eq!(reads.len(), 2);
         assert_eq!(reads[0].0, "read1 description");
@@ -379,8 +418,16 @@ mod tests {
     #[test]
     fn test_parse_paired_fastq() {
         let dir = std::env::temp_dir();
-        let path1 = dir.join(format!("paired_r1_{}_{}.fastq", std::process::id(), std::time::SystemTime::now().elapsed().unwrap().as_nanos()));
-        let path2 = dir.join(format!("paired_r2_{}_{}.fastq", std::process::id(), std::time::SystemTime::now().elapsed().unwrap().as_nanos()));
+        let path1 = dir.join(format!(
+            "paired_r1_{}_{}.fastq",
+            std::process::id(),
+            std::time::SystemTime::now().elapsed().unwrap().as_nanos()
+        ));
+        let path2 = dir.join(format!(
+            "paired_r2_{}_{}.fastq",
+            std::process::id(),
+            std::time::SystemTime::now().elapsed().unwrap().as_nanos()
+        ));
 
         {
             let mut f = std::fs::File::create(&path1).unwrap();

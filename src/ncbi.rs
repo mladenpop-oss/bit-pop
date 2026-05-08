@@ -204,7 +204,10 @@ impl NcbiClient {
         Ok(text)
     }
 
-    pub async fn fetch_fasta_batch(&mut self, accessions: &[&str]) -> Result<Vec<(String, String)>, NcbiError> {
+    pub async fn fetch_fasta_batch(
+        &mut self,
+        accessions: &[&str],
+    ) -> Result<Vec<(String, String)>, NcbiError> {
         let mut results = Vec::new();
         for acc in accessions {
             match self.fetch_fasta(acc).await {
@@ -246,7 +249,10 @@ impl NcbiClient {
         Ok(result.docsums)
     }
 
-    pub async fn fetch_by_accession_version(&mut self, accession_version: &str) -> Result<String, NcbiError> {
+    pub async fn fetch_by_accession_version(
+        &mut self,
+        accession_version: &str,
+    ) -> Result<String, NcbiError> {
         let parts: Vec<&str> = accession_version.split('.').collect();
         if parts.len() >= 2 {
             let accession = parts[0];

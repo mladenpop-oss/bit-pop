@@ -56,7 +56,8 @@ pub fn rank_mappings(
     }
 
     results.sort_by(|a, b| {
-        b.score.partial_cmp(&a.score)
+        b.score
+            .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     results
@@ -64,21 +65,28 @@ pub fn rank_mappings(
 
 /// Filter results: keep only those above a score threshold.
 pub fn filter_by_score(results: Vec<MappingResult>, threshold: f64) -> Vec<MappingResult> {
-    results.into_iter().filter(|r| r.score >= threshold).collect()
+    results
+        .into_iter()
+        .filter(|r| r.score >= threshold)
+        .collect()
 }
 
 /// Deduplicate results: keep highest score per (genome_id, position window).
 pub fn deduplicate(results: Vec<MappingResult>, window: u64) -> Vec<MappingResult> {
     let mut sorted = results;
-    sorted.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let mut kept = Vec::new();
     let mut used: Vec<(u32, u64)> = Vec::new();
 
     for r in sorted {
-        let dominated = used.iter().any(|&(gid, pos)| {
-            gid == r.genome_id && r.position.abs_diff(pos) < window
-        });
+        let dominated = used
+            .iter()
+            .any(|&(gid, pos)| gid == r.genome_id && r.position.abs_diff(pos) < window);
         if !dominated {
             used.push((r.genome_id, r.position));
             kept.push(r);
@@ -95,16 +103,8 @@ mod tests {
 
     #[test]
     fn test_rank_mappings_basic() {
-        let candidates = vec![
-            (0, 100, 5),
-            (0, 200, 3),
-            (1, 300, 4),
-        ];
-        let scores = vec![
-            (0, 100, 0.95),
-            (0, 200, 0.80),
-            (1, 300, 0.90),
-        ];
+        let candidates = vec![(0, 100, 5), (0, 200, 3), (1, 300, 4)];
+        let scores = vec![(0, 100, 0.95), (0, 200, 0.80), (1, 300, 0.90)];
         let mut kmer_counts = HashMap::new();
         kmer_counts.insert(0x1A, 2);
         let results = rank_mappings(&candidates, &scores, &kmer_counts, 10);
@@ -129,9 +129,30 @@ mod tests {
     #[test]
     fn test_filter_by_score() {
         let results = vec![
-            MappingResult { genome_id: 0, position: 100, score: 0.9, cigar: "10M".into(), context: String::new(), is_reverse: false },
-            MappingResult { genome_id: 0, position: 200, score: 0.5, cigar: "10M".into(), context: String::new(), is_reverse: false },
-            MappingResult { genome_id: 0, position: 300, score: 0.3, cigar: "10M".into(), context: String::new(), is_reverse: false },
+            MappingResult {
+                genome_id: 0,
+                position: 100,
+                score: 0.9,
+                cigar: "10M".into(),
+                context: String::new(),
+                is_reverse: false,
+            },
+            MappingResult {
+                genome_id: 0,
+                position: 200,
+                score: 0.5,
+                cigar: "10M".into(),
+                context: String::new(),
+                is_reverse: false,
+            },
+            MappingResult {
+                genome_id: 0,
+                position: 300,
+                score: 0.3,
+                cigar: "10M".into(),
+                context: String::new(),
+                is_reverse: false,
+            },
         ];
         let filtered = filter_by_score(results, 0.6);
         assert_eq!(filtered.len(), 1);
@@ -141,9 +162,30 @@ mod tests {
     #[test]
     fn test_deduplicate() {
         let results = vec![
-            MappingResult { genome_id: 0, position: 100, score: 0.9, cigar: "10M".into(), context: String::new(), is_reverse: false },
-            MappingResult { genome_id: 0, position: 102, score: 0.85, cigar: "10M".into(), context: String::new(), is_reverse: false },
-            MappingResult { genome_id: 0, position: 500, score: 0.8, cigar: "10M".into(), context: String::new(), is_reverse: false },
+            MappingResult {
+                genome_id: 0,
+                position: 100,
+                score: 0.9,
+                cigar: "10M".into(),
+                context: String::new(),
+                is_reverse: false,
+            },
+            MappingResult {
+                genome_id: 0,
+                position: 102,
+                score: 0.85,
+                cigar: "10M".into(),
+                context: String::new(),
+                is_reverse: false,
+            },
+            MappingResult {
+                genome_id: 0,
+                position: 500,
+                score: 0.8,
+                cigar: "10M".into(),
+                context: String::new(),
+                is_reverse: false,
+            },
         ];
         let deduped = deduplicate(results, 10);
         assert_eq!(deduped.len(), 2);

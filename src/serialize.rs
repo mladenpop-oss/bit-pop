@@ -1,5 +1,5 @@
-use std::io::{Read, Write, Result as IoResult};
 use std::collections::HashMap;
+use std::io::{Read, Result as IoResult, Write};
 
 use crate::fm::FmIndex;
 use crate::BitPop;
@@ -116,7 +116,7 @@ pub fn deserialize_bitpop(data: &[u8]) -> IoResult<BitPop> {
         ));
     }
 
-    let magic = &data[pos..pos+4];
+    let magic = &data[pos..pos + 4];
     if magic != MAGIC {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -125,9 +125,9 @@ pub fn deserialize_bitpop(data: &[u8]) -> IoResult<BitPop> {
     }
     pos += 4;
 
-    let version = u32::from_le_bytes(data[pos..pos+4].try_into().map_err(
-        |_| std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to read version"),
-    )?);
+    let version = u32::from_le_bytes(data[pos..pos + 4].try_into().map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to read version")
+    })?);
     // Support both v1 (legacy) and v2 (FM-index)
     if version != 1 && version != VERSION {
         return Err(std::io::Error::new(
@@ -137,14 +137,18 @@ pub fn deserialize_bitpop(data: &[u8]) -> IoResult<BitPop> {
     }
     pos += 4;
 
-    let k = u16::from_le_bytes(data[pos..pos+2].try_into().map_err(
-        |_| std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to read k"),
-    )?) as usize;
+    let k =
+        u16::from_le_bytes(data[pos..pos + 2].try_into().map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to read k")
+        })?) as usize;
     pos += 2;
 
-    let num_genomes = u32::from_le_bytes(data[pos..pos+4].try_into().map_err(
-        |_| std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to read num_genomes"),
-    )?) as usize;
+    let num_genomes = u32::from_le_bytes(data[pos..pos + 4].try_into().map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Failed to read num_genomes",
+        )
+    })?) as usize;
     pos += 4;
 
     let mut genomes: HashMap<u32, Vec<u8>> = HashMap::new();
@@ -152,29 +156,40 @@ pub fn deserialize_bitpop(data: &[u8]) -> IoResult<BitPop> {
 
     for i in 0..num_genomes {
         if pos + 4 > data.len() {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Unexpected end at genome {} name_len", i)));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Unexpected end at genome {} name_len", i),
+            ));
         }
-        let name_len = u32::from_le_bytes(data[pos..pos+4].try_into().unwrap()) as usize;
+        let name_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
         pos += 4;
 
         if pos + name_len > data.len() {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Unexpected end at genome {} name", i)));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Unexpected end at genome {} name", i),
+            ));
         }
-        let name_str = String::from_utf8(data[pos..pos+name_len].to_vec()).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-        })?;
+        let name_str = String::from_utf8(data[pos..pos + name_len].to_vec())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         pos += name_len;
 
         if pos + 8 > data.len() {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Unexpected end at genome {} seq_len", i)));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Unexpected end at genome {} seq_len", i),
+            ));
         }
-        let seq_len = u64::from_le_bytes(data[pos..pos+8].try_into().unwrap()) as usize;
+        let seq_len = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap()) as usize;
         pos += 8;
 
         if pos + seq_len > data.len() {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Unexpected end at genome {} seq", i)));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Unexpected end at genome {} seq", i),
+            ));
         }
-        let seq_bytes = data[pos..pos+seq_len].to_vec();
+        let seq_bytes = data[pos..pos + seq_len].to_vec();
         pos += seq_len;
 
         let gid = i as u32;
@@ -183,13 +198,15 @@ pub fn deserialize_bitpop(data: &[u8]) -> IoResult<BitPop> {
     }
 
     // Build FM-index from loaded genomes
-    let fm_genomes: Vec<(&str, &[u8])> = (0..num_genomes).map(|i| {
-        let gid = i as u32;
-        (
-            genome_names.get(&gid).map(|s| s.as_str()).unwrap_or(""),
-            genomes.get(&gid).map(|s| s.as_slice()).unwrap_or(&[]),
-        )
-    }).collect();
+    let fm_genomes: Vec<(&str, &[u8])> = (0..num_genomes)
+        .map(|i| {
+            let gid = i as u32;
+            (
+                genome_names.get(&gid).map(|s| s.as_str()).unwrap_or(""),
+                genomes.get(&gid).map(|s| s.as_slice()).unwrap_or(&[]),
+            )
+        })
+        .collect();
 
     let fm_index = FmIndex::build(&fm_genomes);
 
@@ -209,7 +226,7 @@ mod tests {
         bp
     }
 
-     #[test]
+    #[test]
     fn test_serialize_deserialize_roundtrip() {
         let bp = make_test_bitpop();
         let bytes = serialize_bitpop(&bp).unwrap();
@@ -226,8 +243,14 @@ mod tests {
         assert!(!results_orig.is_empty());
         assert!(!results_loaded.is_empty());
         for orig in &results_orig {
-            let loaded_match = results_loaded.iter().find(|r| r.genome_id == orig.genome_id);
-            assert!(loaded_match.is_some(), "Missing genome_id {} in loaded", orig.genome_id);
+            let loaded_match = results_loaded
+                .iter()
+                .find(|r| r.genome_id == orig.genome_id);
+            assert!(
+                loaded_match.is_some(),
+                "Missing genome_id {} in loaded",
+                orig.genome_id
+            );
         }
     }
 
@@ -305,7 +328,9 @@ mod tests {
 
         assert_eq!(results_orig.len(), results_loaded.len());
         for orig in &results_orig {
-            let loaded_match = results_loaded.iter().find(|r| r.genome_id == orig.genome_id);
+            let loaded_match = results_loaded
+                .iter()
+                .find(|r| r.genome_id == orig.genome_id);
             assert!(loaded_match.is_some());
             let loaded_r = loaded_match.unwrap();
             assert!((orig.score - loaded_r.score).abs() < 0.001);
@@ -315,7 +340,12 @@ mod tests {
     #[test]
     fn test_serialize_large_genome() {
         let mut bp = BitPop::new(8);
-        let genome = format!("{}{}{}", "ACGT".repeat(5000), "AACCGGTT", "TTTT".repeat(5000));
+        let genome = format!(
+            "{}{}{}",
+            "ACGT".repeat(5000),
+            "AACCGGTT",
+            "TTTT".repeat(5000)
+        );
         bp.add_genome("large", &genome);
         bp.build();
 

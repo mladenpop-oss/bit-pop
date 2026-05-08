@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use sha2::{Sha256, Digest};
 
 const CACHE_DIR_NAME: &str = ".bitpop";
 const MANIFEST_FILE: &str = "manifest.json";
@@ -177,15 +177,13 @@ impl CacheManager {
     pub fn has_index(&self, accession: &str, k: usize) -> bool {
         let genome = self.manifest.get(accession);
         match genome {
-            Some(g) => {
-                match &g.index_path {
-                    Some(path) => Path::new(path).exists(),
-                    None => {
-                        let path = self.get_index_path(accession, k);
-                        path.exists()
-                    }
+            Some(g) => match &g.index_path {
+                Some(path) => Path::new(path).exists(),
+                None => {
+                    let path = self.get_index_path(accession, k);
+                    path.exists()
                 }
-            }
+            },
             None => false,
         }
     }
@@ -274,7 +272,11 @@ impl CacheManager {
             Ok(fasta) => {
                 let parts: Vec<&str> = accession.split('.').collect();
                 let version = if parts.len() >= 2 { parts[1] } else { "1" };
-                let base = if parts.len() >= 2 { parts[0] } else { accession };
+                let base = if parts.len() >= 2 {
+                    parts[0]
+                } else {
+                    accession
+                };
                 self.cache_sequence(accession, version, base, &fasta)?;
                 let genome = self.manifest.get(accession).unwrap();
                 Ok(Some(Path::new(&genome.fasta_path).to_path_buf()))

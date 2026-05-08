@@ -12,8 +12,12 @@ const SAMPLE_INTERVAL: usize = 32;
 // --- Suffix Array Construction (SA-IS via libsais, O(n)) ---
 fn build_suffix_array(s: &[u8]) -> Vec<usize> {
     let n = s.len();
-    if n == 0 { return vec![]; }
-    if n == 1 { return vec![0]; }
+    if n == 0 {
+        return vec![];
+    }
+    if n == 1 {
+        return vec![0];
+    }
 
     // s is u8 with $=0, A=1, C=2, G=3, T=4
     // libsais treats last char as implicit sentinel (smallest)
@@ -26,7 +30,11 @@ fn build_suffix_array(s: &[u8]) -> Vec<usize> {
         .run();
 
     match result {
-        Ok(sa_with_text) => sa_with_text.suffix_array().iter().map(|&x| x as usize).collect(),
+        Ok(sa_with_text) => sa_with_text
+            .suffix_array()
+            .iter()
+            .map(|&x| x as usize)
+            .collect(),
         Err(e) => {
             eprintln!("libsais error: {:?}, falling back to radix sort", e);
             build_suffix_array_radix_fallback(s, n)
@@ -49,7 +57,9 @@ fn build_suffix_array_radix_fallback(s: &[u8], n: usize) -> Vec<usize> {
             let key = if i + k < n { rank[i + k] + 1 } else { 0 };
             cnt[key as usize] += 1;
         }
-        for i in 1..bucket_size { cnt[i] += cnt[i - 1]; }
+        for i in 1..bucket_size {
+            cnt[i] += cnt[i - 1];
+        }
 
         let mut sa2 = vec![0usize; n];
         for &i in sa.iter().rev() {
@@ -63,7 +73,9 @@ fn build_suffix_array_radix_fallback(s: &[u8], n: usize) -> Vec<usize> {
             let key = rank[i] + 1;
             cnt[key as usize] += 1;
         }
-        for i in 1..bucket_size { cnt[i] += cnt[i - 1]; }
+        for i in 1..bucket_size {
+            cnt[i] += cnt[i - 1];
+        }
 
         let mut sa3 = vec![0usize; n];
         for &i in sa2.iter().rev() {
@@ -83,7 +95,9 @@ fn build_suffix_array_radix_fallback(s: &[u8], n: usize) -> Vec<usize> {
         std::mem::swap(&mut sa, &mut sa3);
         std::mem::swap(&mut rank, &mut new_rank);
 
-        if rank[sa[n - 1]] == n as u8 - 1 { break; }
+        if rank[sa[n - 1]] == n as u8 - 1 {
+            break;
+        }
         k *= 2;
     }
 
@@ -102,8 +116,12 @@ fn build_bwt_from_sa(sa: &[usize], s: &[u8]) -> Vec<u8> {
 
 fn build_bwt_from_sa_parallel(sa: &[usize], s: &[u8], num_threads: usize) -> Vec<u8> {
     let n = sa.len();
-    if n == 0 { return vec![]; }
-    if n == 1 { return vec![s[0]]; }
+    if n == 0 {
+        return vec![];
+    }
+    if n == 1 {
+        return vec![s[0]];
+    }
 
     let chunk_size = n.div_ceil(num_threads);
     let num_chunks = ((n - 1) / chunk_size) + 1;
@@ -137,23 +155,30 @@ impl OccCounter {
         let num_samples = len.div_ceil(sample_interval);
         let mut samples: Vec<[u32; ALPHABET_SIZE]> = vec![[0; ALPHABET_SIZE]; num_samples];
         let mut counts = [0u32; ALPHABET_SIZE];
-        
+
         for (i, &c) in bwt.iter().enumerate() {
             let ci = c as usize;
-            if ci < ALPHABET_SIZE { counts[ci] += 1; }
+            if ci < ALPHABET_SIZE {
+                counts[ci] += 1;
+            }
             if (i + 1) % sample_interval == 0 {
                 let idx = (i + 1) / sample_interval - 1;
-                if idx < num_samples { samples[idx] = counts; }
+                if idx < num_samples {
+                    samples[idx] = counts;
+                }
             }
         }
         if !len.is_multiple_of(sample_interval) {
             samples[num_samples - 1] = counts;
         }
-        
-        OccCounter { samples, sample_interval }
+
+        OccCounter {
+            samples,
+            sample_interval,
+        }
     }
 
-  pub fn new_parallel(bwt: &[u8], sample_interval: usize, _num_threads: usize) -> Self {
+    pub fn new_parallel(bwt: &[u8], sample_interval: usize, _num_threads: usize) -> Self {
         let len = bwt.len();
         if len == 0 {
             return OccCounter {
@@ -168,30 +193,41 @@ impl OccCounter {
 
         for (i, &c) in bwt.iter().enumerate() {
             let ci = c as usize;
-            if ci < ALPHABET_SIZE { counts[ci] += 1; }
+            if ci < ALPHABET_SIZE {
+                counts[ci] += 1;
+            }
             if (i + 1) % sample_interval == 0 {
                 let idx = (i + 1) / sample_interval - 1;
-                if idx < num_samples { samples[idx] = counts; }
+                if idx < num_samples {
+                    samples[idx] = counts;
+                }
             }
         }
         if !len.is_multiple_of(sample_interval) {
             samples[num_samples - 1] = counts;
         }
 
-        OccCounter { samples, sample_interval }
+        OccCounter {
+            samples,
+            sample_interval,
+        }
     }
-    
+
     pub fn occ(&self, bwt: &[u8], c: u8, i: usize) -> u64 {
-        if i == 0 { return 0; }
+        if i == 0 {
+            return 0;
+        }
         let ci = c as usize;
-        if ci >= ALPHABET_SIZE { return 0; }
-        
+        if ci >= ALPHABET_SIZE {
+            return 0;
+        }
+
         let i = i.min(bwt.len());
         let sample_idx = (i - 1) / self.sample_interval;
         let idx = sample_idx.min(self.samples.len() - 1);
         let sample_end = ((idx + 1) * self.sample_interval).min(bwt.len());
         let base = self.samples[idx][ci] as u64;
-        
+
         if sample_end == i {
             base
         } else if sample_end > i {
@@ -267,12 +303,14 @@ impl FmIndex {
     pub fn build(genomes: &[(&str, &[u8])]) -> Self {
         let mut s: Vec<u8> = Vec::new();
         let mut genome_boundaries: Vec<(usize, usize, u32)> = Vec::new();
-        
+
         for (gid, (_, seq)) in genomes.iter().enumerate() {
             let start = s.len();
             for &byte in *seq {
                 // Input bytes should be 1-4 (A=1, C=2, G=3, T=4)
-                if (1..=4).contains(&byte) { s.push(byte); }
+                if (1..=4).contains(&byte) {
+                    s.push(byte);
+                }
             }
             let gid_u32 = gid as u32;
             if gid_u32 < (genomes.len() - 1) as u32 {
@@ -284,12 +322,14 @@ impl FmIndex {
 
         let sa = build_suffix_array(&s);
         let bwt = build_bwt_from_sa(&sa, &s);
-        
+
         // C-array: C[c] = number of chars < c in BWT
         let mut counts = [0usize; ALPHABET_SIZE];
         for &c in bwt.iter() {
             let ci = c as usize;
-            if ci < ALPHABET_SIZE { counts[ci] += 1; }
+            if ci < ALPHABET_SIZE {
+                counts[ci] += 1;
+            }
         }
         let mut c_array = [0usize; ALPHABET_SIZE];
         let mut sum = 0usize;
@@ -297,10 +337,17 @@ impl FmIndex {
             c_array[c] = sum;
             sum += counts[c];
         }
-        
+
         let occ = OccCounter::new(&bwt, SAMPLE_INTERVAL);
-        
-        FmIndex { bwt, sa, c_array, occ, genome_boundaries, num_genomes: genomes.len() }
+
+        FmIndex {
+            bwt,
+            sa,
+            c_array,
+            occ,
+            genome_boundaries,
+            num_genomes: genomes.len(),
+        }
     }
 
     /// Build FM-index in parallel using rayon.
@@ -309,11 +356,13 @@ impl FmIndex {
     pub fn build_parallel(genomes: &[(&str, &[u8])]) -> Self {
         let mut s: Vec<u8> = Vec::new();
         let mut genome_boundaries: Vec<(usize, usize, u32)> = Vec::new();
-        
+
         for (gid, (_, seq)) in genomes.iter().enumerate() {
             let start = s.len();
             for &byte in *seq {
-                if (1..=4).contains(&byte) { s.push(byte); }
+                if (1..=4).contains(&byte) {
+                    s.push(byte);
+                }
             }
             let gid_u32 = gid as u32;
             if gid_u32 < (genomes.len() - 1) as u32 {
@@ -326,11 +375,13 @@ impl FmIndex {
         let num_threads = rayon::current_num_threads();
         let sa = build_suffix_array(&s);
         let bwt = build_bwt_from_sa_parallel(&sa, &s, num_threads);
-        
+
         let mut counts = [0usize; ALPHABET_SIZE];
         for &c in bwt.iter() {
             let ci = c as usize;
-            if ci < ALPHABET_SIZE { counts[ci] += 1; }
+            if ci < ALPHABET_SIZE {
+                counts[ci] += 1;
+            }
         }
         let mut c_array = [0usize; ALPHABET_SIZE];
         let mut sum = 0usize;
@@ -338,32 +389,43 @@ impl FmIndex {
             c_array[c] = sum;
             sum += counts[c];
         }
-        
+
         let occ = OccCounter::new_parallel(&bwt, SAMPLE_INTERVAL, num_threads);
-        
-        FmIndex { bwt, sa, c_array, occ, genome_boundaries, num_genomes: genomes.len() }
+
+        FmIndex {
+            bwt,
+            sa,
+            c_array,
+            occ,
+            genome_boundaries,
+            num_genomes: genomes.len(),
+        }
     }
-    
+
     /// Backward search: find SA range [lower, upper) for pattern. O(m).
     /// Pattern bytes: A=1, C=2, G=3, T=4
     pub fn backward_search(&self, pattern: &[u8]) -> Option<(usize, usize)> {
         let mut lower: usize = 0;
         let mut upper: usize = self.bwt.len();
-        
+
         for &byte in pattern.iter().rev() {
             let c = byte;
-            if c == 0 || c > 4 { return None; }
+            if c == 0 || c > 4 {
+                return None;
+            }
             let ci = c as usize;
-            
+
             let occ_l = self.occ.occ(&self.bwt, c, lower);
             let occ_u = self.occ.occ(&self.bwt, c, upper);
-            
+
             lower = self.c_array[ci] + occ_l as usize;
             upper = self.c_array[ci] + occ_u as usize;
-            
-            if lower >= upper { return None; }
+
+            if lower >= upper {
+                return None;
+            }
         }
-        
+
         Some((lower, upper))
     }
 
@@ -387,7 +449,9 @@ impl FmIndex {
 
         for &byte in pattern.iter().rev() {
             let c = byte;
-            if c == 0 || c > 4 { return None; }
+            if c == 0 || c > 4 {
+                return None;
+            }
             let ci = c as usize;
 
             let occ_l = self.occ.occ(&self.bwt, c, lower);
@@ -396,57 +460,68 @@ impl FmIndex {
             lower = self.c_array[ci] + occ_l as usize;
             upper = self.c_array[ci] + occ_u as usize;
 
-            if lower >= upper { return None; }
+            if lower >= upper {
+                return None;
+            }
         }
 
         Some((lower, upper))
     }
-    
+
     /// Find all positions where pattern occurs.
     pub fn find_positions(&self, pattern: &[u8], max_positions: usize) -> Vec<(u32, u64)> {
         let (lower, upper) = match self.backward_search(pattern) {
             Some(r) => r,
             None => return Vec::new(),
         };
-        
+
         let mut positions = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        
+
         for rank in lower..upper {
-            if positions.len() >= max_positions { break; }
+            if positions.len() >= max_positions {
+                break;
+            }
             let sa_pos = self.sa[rank];
             let (genome_id, genome_pos) = self.sa_to_genome_pos(sa_pos);
             if seen.insert((genome_id, genome_pos)) {
                 positions.push((genome_id, genome_pos as u64));
             }
         }
-        
+
         positions
     }
 
     /// Find all positions where spaced pattern occurs.
     /// Only matches on positions where mask[i] == true.
-    pub fn find_positions_spaced(&self, kmer: &[u8], mask: &[bool], max_positions: usize) -> Vec<(u32, u64)> {
+    pub fn find_positions_spaced(
+        &self,
+        kmer: &[u8],
+        mask: &[bool],
+        max_positions: usize,
+    ) -> Vec<(u32, u64)> {
         let (lower, upper) = match self.backward_search_spaced(kmer, mask) {
             Some(r) => r,
             None => return Vec::new(),
         };
-        
+
         let mut positions = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        
+
         for rank in lower..upper {
-            if positions.len() >= max_positions { break; }
+            if positions.len() >= max_positions {
+                break;
+            }
             let sa_pos = self.sa[rank];
             let (genome_id, genome_pos) = self.sa_to_genome_pos(sa_pos);
             if seen.insert((genome_id, genome_pos)) {
                 positions.push((genome_id, genome_pos as u64));
             }
         }
-        
+
         positions
     }
-    
+
     fn sa_to_genome_pos(&self, sa_pos: usize) -> (u32, usize) {
         let mut lo = 0usize;
         let mut hi = self.genome_boundaries.len();
@@ -464,7 +539,7 @@ impl FmIndex {
         }
         (0, 0)
     }
-    
+
     /// Count occurrences of pattern. O(m), independent of genome size.
     pub fn count_occurrences(&self, pattern: &[u8]) -> usize {
         match self.backward_search(pattern) {
@@ -479,15 +554,31 @@ impl FmIndex {
             None => 0,
         }
     }
-    
-    pub fn len(&self) -> usize { self.bwt.len() }
-    pub fn is_empty(&self) -> bool { self.bwt.is_empty() }
-    pub fn num_genomes(&self) -> usize { self.num_genomes }
-    pub fn genome_boundaries(&self) -> &Vec<(usize, usize, u32)> { &self.genome_boundaries }
-    pub fn sa_at(&self, rank: usize) -> usize { self.sa[rank] }
-    pub fn sa_len(&self) -> usize { self.sa.len() }
-    pub fn bwt_at(&self, pos: usize) -> u8 { self.bwt[pos] }
-    pub fn c_array(&self, idx: usize) -> usize { self.c_array[idx] }
+
+    pub fn len(&self) -> usize {
+        self.bwt.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.bwt.is_empty()
+    }
+    pub fn num_genomes(&self) -> usize {
+        self.num_genomes
+    }
+    pub fn genome_boundaries(&self) -> &Vec<(usize, usize, u32)> {
+        &self.genome_boundaries
+    }
+    pub fn sa_at(&self, rank: usize) -> usize {
+        self.sa[rank]
+    }
+    pub fn sa_len(&self) -> usize {
+        self.sa.len()
+    }
+    pub fn bwt_at(&self, pos: usize) -> u8 {
+        self.bwt[pos]
+    }
+    pub fn c_array(&self, idx: usize) -> usize {
+        self.c_array[idx]
+    }
 
     /// Create an FmIndex from components (for deserialization).
     pub fn from_components(
@@ -498,7 +589,14 @@ impl FmIndex {
         genome_boundaries: Vec<(usize, usize, u32)>,
         num_genomes: usize,
     ) -> Self {
-        FmIndex { bwt, sa, c_array, occ, genome_boundaries, num_genomes }
+        FmIndex {
+            bwt,
+            sa,
+            c_array,
+            occ,
+            genome_boundaries,
+            num_genomes,
+        }
     }
 }
 
@@ -526,9 +624,15 @@ mod tests {
         for i in 0..sa.len() - 1 {
             let a = sa[i];
             let b = sa[i + 1];
-            assert!(&s[a..] <= &s[b..],
+            assert!(
+                &s[a..] <= &s[b..],
                 "SA not sorted at {}: suffix[{}]={:?} > suffix[{}]={:?}",
-                i, a, &s[a..], b, &s[b..]);
+                i,
+                a,
+                &s[a..],
+                b,
+                &s[b..]
+            );
         }
     }
 
@@ -566,11 +670,13 @@ mod tests {
         let g2 = vec![4, 4, 4, 4, 2, 2, 2, 2];
         let index = FmIndex::build(&[("human", &g1), ("mouse", &g2)]);
         assert_eq!(index.num_genomes(), 2);
-        
+
         let pattern = vec![1, 2, 3, 4]; // ACGT
         let positions = index.find_positions(&pattern, 100);
         assert!(!positions.is_empty());
-        for &(gid, _) in &positions { assert_eq!(gid, 0); }
+        for &(gid, _) in &positions {
+            assert_eq!(gid, 0);
+        }
     }
 
     #[test]
@@ -586,7 +692,7 @@ mod tests {
         let g1 = vec![1, 2, 3, 4, 1, 2, 3, 4];
         let g2 = vec![1, 2, 3, 4, 1, 2, 3, 4];
         let index = FmIndex::build(&[("human", &g1), ("chimp", &g2)]);
-        
+
         let pattern = vec![1, 2, 3, 4];
         let positions = index.find_positions(&pattern, 100);
         let genomes: std::collections::HashSet<u32> = positions.iter().map(|(g, _)| *g).collect();
@@ -597,7 +703,7 @@ mod tests {
     fn test_repetitive_pattern() {
         let seq: Vec<u8> = (0..400u32).map(|i| ((i % 4) + 1) as u8).collect(); // ACGT repeated 100x
         let index = FmIndex::build(&[("test", &seq)]);
-        
+
         assert!(index.count_occurrences(&vec![1, 2, 3, 4]) >= 100);
         assert!(index.count_occurrences(&vec![1, 2, 3, 4, 1, 2, 3, 4]) >= 50);
     }
@@ -694,29 +800,32 @@ mod tests {
     fn test_spaced_seed_coverage() {
         let seed = SpacedSeed::from_binary("11101001110111");
         assert_eq!(seed.len(), 14);
-        assert!((seed.coverage() - 10.0/14.0).abs() < 0.01);
+        assert!((seed.coverage() - 10.0 / 14.0).abs() < 0.01);
     }
 
     #[test]
     fn test_backward_search_spaced() {
         let seq = vec![1, 2, 3, 1, 4, 1, 2, 4, 1, 2, 3, 4, 1, 2];
         let index = FmIndex::build(&[("test", &seq)]);
-        
+
         let kmer = vec![1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 1, 2];
         let mask = SpacedSeed::default_v1().pattern;
-        
+
         let result = index.backward_search_spaced(&kmer, &mask);
-        assert!(result.is_some(), "Spaced seed search should find pattern in sequence");
+        assert!(
+            result.is_some(),
+            "Spaced seed search should find pattern in sequence"
+        );
     }
 
     #[test]
     fn test_find_positions_spaced() {
         let seq = vec![1, 2, 3, 1, 4, 1, 2, 4, 1, 2, 3, 4, 1, 2];
         let index = FmIndex::build(&[("test", &seq)]);
-        
+
         let kmer = vec![1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 1, 2];
         let mask = SpacedSeed::default_v1().pattern;
-        
+
         let positions = index.find_positions_spaced(&kmer, &mask, 100);
         assert!(!positions.is_empty(), "Should find at least one position");
         assert_eq!(positions[0].0, 0);
@@ -726,14 +835,17 @@ mod tests {
     fn test_spaced_seed_vs_exact_search() {
         let seq = vec![1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 1, 2];
         let index = FmIndex::build(&[("test", &seq)]);
-        
+
         let kmer = vec![1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 1, 2];
         let all_true_mask = vec![true; 14];
-        
+
         let spaced_result = index.backward_search_spaced(&kmer, &all_true_mask);
         let exact_result = index.backward_search(&kmer[..14]);
-        
-        assert!(spaced_result.is_some(), "Spaced with all-true mask should match exact search");
+
+        assert!(
+            spaced_result.is_some(),
+            "Spaced with all-true mask should match exact search"
+        );
         assert!(exact_result.is_some());
     }
 }

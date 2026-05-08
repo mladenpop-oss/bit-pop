@@ -56,16 +56,26 @@ impl IndexMetadata {
         fs::write(path, content)
     }
 
-    pub fn add_genome(&mut self, name: &str, accession: Option<String>, local_path: Option<String>, sequence_length: usize, checksum: String) {
+    pub fn add_genome(
+        &mut self,
+        name: &str,
+        accession: Option<String>,
+        local_path: Option<String>,
+        sequence_length: usize,
+        checksum: String,
+    ) {
         let gid = self.genome_count;
-        self.genomes.insert(gid, GenomeEntry {
-            name: name.to_string(),
-            accession,
-            local_path,
-            sequence_length,
-            added_at: chrono::Utc::now().to_rfc3339(),
-            checksum,
-        });
+        self.genomes.insert(
+            gid,
+            GenomeEntry {
+                name: name.to_string(),
+                accession,
+                local_path,
+                sequence_length,
+                added_at: chrono::Utc::now().to_rfc3339(),
+                checksum,
+            },
+        );
         self.genome_count += 1;
         self.total_bases += sequence_length;
         self.updated_at = chrono::Utc::now().to_rfc3339();
@@ -89,9 +99,7 @@ impl DynamicIndexManager {
         let metadata_path = index_path.with_extension("bitpop.meta");
 
         let metadata = if metadata_path.exists() {
-            IndexMetadata::from_file(&metadata_path).unwrap_or_else(|_| {
-                IndexMetadata::new(8)
-            })
+            IndexMetadata::from_file(&metadata_path).unwrap_or_else(|_| IndexMetadata::new(8))
         } else {
             IndexMetadata::new(8)
         };
@@ -163,7 +171,9 @@ impl DynamicIndexManager {
                 }
             };
 
-            let result = self.cache.get_or_download(accession, _k, |_acc| Ok(fasta.clone()))?;
+            let result = self
+                .cache
+                .get_or_download(accession, _k, |_acc| Ok(fasta.clone()))?;
 
             if let Some(path) = result {
                 if let Some(genome) = self.cache.manifest().get(accession) {
@@ -196,9 +206,7 @@ impl DynamicIndexManager {
         let fasta_content = content.as_str();
         let mut lines = fasta_content.lines();
         let header = lines.next().unwrap_or("");
-        let genome_name = name.unwrap_or_else(|| {
-            parse_header_name(header)
-        });
+        let genome_name = name.unwrap_or_else(|| parse_header_name(header));
 
         let sequence_length = fasta_content.len();
 
@@ -246,9 +254,10 @@ impl DynamicIndexManager {
         for (_gid, genome) in self.list_genomes() {
             if let Some(ref acc) = genome.accession {
                 if let Ok(fasta) = client.fetch_by_accession_version(acc).await {
-                    let current_checksum = CacheManifest::compute_checksum(
-                        Path::new(genome.local_path.as_deref().unwrap_or(""))
-                    ).unwrap_or_default();
+                    let current_checksum = CacheManifest::compute_checksum(Path::new(
+                        genome.local_path.as_deref().unwrap_or(""),
+                    ))
+                    .unwrap_or_default();
 
                     let new_checksum = {
                         let mut hasher = Sha256::new();
@@ -281,5 +290,3 @@ fn parse_header_name(header: &str) -> &str {
     }
     parts[0]
 }
-
-

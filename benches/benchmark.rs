@@ -1,8 +1,11 @@
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
-use bit_pop::BitPop;
-use bit_pop::align::{two_bit_align, smith_waterman, bit_parallel_exact, myers_edit_distance_gaps, myers_edit_distance_nano};
+use bit_pop::align::{
+    bit_parallel_exact, myers_edit_distance_gaps, myers_edit_distance_nano, smith_waterman,
+    two_bit_align,
+};
 use bit_pop::fm::FmIndex;
-use bit_pop::serialize::{serialize_bitpop, deserialize_bitpop};
+use bit_pop::serialize::{deserialize_bitpop, serialize_bitpop};
+use bit_pop::BitPop;
+use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 
 // --- Helpers ---
 
@@ -42,21 +45,31 @@ fn bench_two_bit_align(c: &mut Criterion) {
 
     let read_50 = encode_seq("ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT");
     let genome_region = encode_seq("TTTTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTTTTT");
-    group.bench_function("50bp_exact", |b| b.iter(|| two_bit_align(&read_50, &genome_region)));
+    group.bench_function("50bp_exact", |b| {
+        b.iter(|| two_bit_align(&read_50, &genome_region))
+    });
 
     let read_100 = encode_seq(&pseudo_random_sequence(100));
     let genome_100 = encode_seq(&format!("TTTTT{}", pseudo_random_sequence(100)));
-    group.bench_function("100bp_exact", |b| b.iter(|| two_bit_align(&read_100, &genome_100)));
+    group.bench_function("100bp_exact", |b| {
+        b.iter(|| two_bit_align(&read_100, &genome_100))
+    });
 
     let read_150 = encode_seq(&pseudo_random_sequence(150));
     let genome_150 = encode_seq(&format!("TTTTT{}", pseudo_random_sequence(150)));
-    group.bench_function("150bp_exact", |b| b.iter(|| two_bit_align(&read_150, &genome_150)));
+    group.bench_function("150bp_exact", |b| {
+        b.iter(|| two_bit_align(&read_150, &genome_150))
+    });
 
     let read_mismatch = encode_seq("ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTAACA");
-    group.bench_function("50bp_1pct_mismatch", |b| b.iter(|| two_bit_align(&read_mismatch, &genome_region)));
+    group.bench_function("50bp_1pct_mismatch", |b| {
+        b.iter(|| two_bit_align(&read_mismatch, &genome_region))
+    });
 
     let read_none = encode_seq(&"T".repeat(50));
-    group.bench_function("50bp_no_match", |b| b.iter(|| two_bit_align(&read_none, &genome_region)));
+    group.bench_function("50bp_no_match", |b| {
+        b.iter(|| two_bit_align(&read_none, &genome_region))
+    });
 
     group.finish();
 }
@@ -66,11 +79,15 @@ fn bench_smith_waterman(c: &mut Criterion) {
 
     let read_50 = encode_seq("ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT");
     let genome_region = encode_seq("TTTTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTTTTT");
-    group.bench_function("50bp_exact", |b| b.iter(|| smith_waterman(&read_50, &genome_region)));
+    group.bench_function("50bp_exact", |b| {
+        b.iter(|| smith_waterman(&read_50, &genome_region))
+    });
 
     let read_100 = encode_seq(&pseudo_random_sequence(100));
     let genome_100 = encode_seq(&format!("TTTTT{}", pseudo_random_sequence(100)));
-    group.bench_function("100bp_exact", |b| b.iter(|| smith_waterman(&read_100, &genome_100)));
+    group.bench_function("100bp_exact", |b| {
+        b.iter(|| smith_waterman(&read_100, &genome_100))
+    });
 
     group.finish();
 }
@@ -80,10 +97,14 @@ fn bench_bit_parallel_exact(c: &mut Criterion) {
 
     let text = encode_seq(&pseudo_random_sequence(10000));
     let pattern = encode_seq(&pseudo_random_sequence(8));
-    group.bench_function("8bp_in_10kb", |b| b.iter(|| bit_parallel_exact(&pattern, &text)));
+    group.bench_function("8bp_in_10kb", |b| {
+        b.iter(|| bit_parallel_exact(&pattern, &text))
+    });
 
     let pattern_31 = encode_seq(&pseudo_random_sequence(31));
-    group.bench_function("31bp_in_10kb", |b| b.iter(|| bit_parallel_exact(&pattern_31, &text)));
+    group.bench_function("31bp_in_10kb", |b| {
+        b.iter(|| bit_parallel_exact(&pattern_31, &text))
+    });
 
     group.finish();
 }
@@ -96,8 +117,12 @@ fn bench_comparison(c: &mut Criterion) {
         let genome = encode_seq(&format!("TTTTT{}", pseudo_random_sequence(size)));
 
         group.throughput(Throughput::Elements(size as u64));
-        group.bench_with_input(format!("{size}bp_two_bit"), &(), |b, _| b.iter(|| two_bit_align(&read, &genome)));
-        group.bench_with_input(format!("{size}bp_smith_waterman"), &(), |b, _| b.iter(|| smith_waterman(&read, &genome)));
+        group.bench_with_input(format!("{size}bp_two_bit"), &(), |b, _| {
+            b.iter(|| two_bit_align(&read, &genome))
+        });
+        group.bench_with_input(format!("{size}bp_smith_waterman"), &(), |b, _| {
+            b.iter(|| smith_waterman(&read, &genome))
+        });
     }
 
     group.finish();
@@ -119,9 +144,11 @@ fn bench_myers_vs_sw(c: &mut Criterion) {
         group.bench_with_input(format!("{size}bp_myers_nano"), &pattern.clone(), |b, p| {
             b.iter(|| myers_edit_distance_nano(p, &text))
         });
-        group.bench_with_input(format!("{size}bp_smith_waterman"), &pattern.clone(), |b, p| {
-            b.iter(|| smith_waterman(p, &text))
-        });
+        group.bench_with_input(
+            format!("{size}bp_smith_waterman"),
+            &pattern.clone(),
+            |b, p| b.iter(|| smith_waterman(p, &text)),
+        );
     }
 
     group.finish();
@@ -133,7 +160,11 @@ fn bench_myers_accuracy(c: &mut Criterion) {
     let test_cases = [
         ("perfect", "ACGTACGTACGTACGTACGT", "ACGTACGTACGTACGTACGT"),
         ("1_mismatch", "ACGTACGTACGTACGTACGT", "ACGTACGTTCGTACGTACGT"),
-        ("2_mismatches", "ACGTACGTACGTACGTACGT", "ACGTTCGTTCAAGTACGTACGT"),
+        (
+            "2_mismatches",
+            "ACGTACGTACGTACGTACGT",
+            "ACGTTCGTTCAAGTACGTACGT",
+        ),
         ("1_ins", "ACGTACGTACGTACGTACGT", "ACGTACGTAACGTACGTACGT"),
         ("1_del", "ACGTACGTACGTACGTACGT", "ACGTACGTCGTACGTACGT"),
     ];
@@ -183,12 +214,7 @@ fn bench_fm_backward_search(c: &mut Criterion) {
     let genome = encode_dna(&pseudo_random_sequence(1_000_000));
     let idx = FmIndex::build(&[("1mb", &genome)]);
 
-    let pattern_lens = [
-        ("4bp", 4),
-        ("8bp", 8),
-        ("15bp", 15),
-        ("31bp", 31),
-    ];
+    let pattern_lens = [("4bp", 4), ("8bp", 8), ("15bp", 15), ("31bp", 31)];
 
     for (label, plen) in &pattern_lens {
         let pattern = encode_dna(&pseudo_random_sequence(*plen));
@@ -251,8 +277,12 @@ fn bench_kmer_filter_threshold(c: &mut Criterion) {
     let read = &pseudo_random_sequence(50);
 
     group.bench_function("100kb_no_threshold", |b| b.iter(|| bp.kmer_filter(read)));
-    group.bench_function("100kb_threshold_10", |b| b.iter(|| bp.kmer_filter_with_threshold(read, 10)));
-    group.bench_function("100kb_threshold_100", |b| b.iter(|| bp.kmer_filter_with_threshold(read, 100)));
+    group.bench_function("100kb_threshold_10", |b| {
+        b.iter(|| bp.kmer_filter_with_threshold(read, 10))
+    });
+    group.bench_function("100kb_threshold_100", |b| {
+        b.iter(|| bp.kmer_filter_with_threshold(read, 100))
+    });
 
     group.finish();
 }
@@ -275,7 +305,9 @@ fn bench_anchor_filter(c: &mut Criterion) {
         bp_multi.add_genome(&format!("g{i}"), &pseudo_random_sequence(200_000));
     }
     bp_multi.build();
-    group.bench_function("50bp_5genomes_1mb_total", |b| b.iter(|| bp_multi.anchor_filter(read, 0.5)));
+    group.bench_function("50bp_5genomes_1mb_total", |b| {
+        b.iter(|| bp_multi.anchor_filter(read, 0.5))
+    });
 
     group.finish();
 }
@@ -288,9 +320,15 @@ fn bench_anchor_filter_threshold(c: &mut Criterion) {
     bp.build();
     let read = &pseudo_random_sequence(50);
 
-    group.bench_function("1mb_no_threshold", |b| b.iter(|| bp.anchor_filter(read, 0.5)));
-    group.bench_function("1mb_threshold_100", |b| b.iter(|| bp.anchor_filter_with_threshold(read, 0.5, 100)));
-    group.bench_function("1mb_threshold_1000", |b| b.iter(|| bp.anchor_filter_with_threshold(read, 0.5, 1000)));
+    group.bench_function("1mb_no_threshold", |b| {
+        b.iter(|| bp.anchor_filter(read, 0.5))
+    });
+    group.bench_function("1mb_threshold_100", |b| {
+        b.iter(|| bp.anchor_filter_with_threshold(read, 0.5, 100))
+    });
+    group.bench_function("1mb_threshold_1000", |b| {
+        b.iter(|| bp.anchor_filter_with_threshold(read, 0.5, 1000))
+    });
 
     group.finish();
 }
@@ -328,7 +366,9 @@ fn bench_full_pipeline(c: &mut Criterion) {
         bp_multi.add_genome(&format!("g{i}"), &pseudo_random_sequence(200_000));
     }
     bp_multi.build();
-    group.bench_function("100bp_5genomes_1mb_total", |b| b.iter(|| bp_multi.map_read(read_long, 3)));
+    group.bench_function("100bp_5genomes_1mb_total", |b| {
+        b.iter(|| bp_multi.map_read(read_long, 3))
+    });
 
     group.finish();
 }
@@ -338,10 +378,7 @@ fn bench_full_pipeline(c: &mut Criterion) {
 fn bench_serialize(c: &mut Criterion) {
     let mut group = c.benchmark_group("serialize");
 
-    let sizes = [
-        ("10kb", 10_000),
-        ("100kb", 100_000),
-    ];
+    let sizes = [("10kb", 10_000), ("100kb", 100_000)];
 
     for (label, sz) in &sizes {
         let mut bp = BitPop::new(8);
@@ -361,10 +398,7 @@ fn bench_serialize(c: &mut Criterion) {
 fn bench_deserialize(c: &mut Criterion) {
     let mut group = c.benchmark_group("deserialize");
 
-    let sizes = [
-        ("10kb", 10_000),
-        ("100kb", 100_000),
-    ];
+    let sizes = [("10kb", 10_000), ("100kb", 100_000)];
 
     for (label, sz) in &sizes {
         let mut bp = BitPop::new(8);

@@ -5,7 +5,7 @@
 /// 2-bit XOR alignment — simple, fast, reliable.
 /// Slides pattern across text, counts exact matches via XOR, returns best score + CIGAR.
 /// Pattern <= 31 bases (62 bits fit in u64).
-/// 
+///
 /// Score: 0.0 (no match) to 1.0 (perfect match)
 /// CIGAR: "97M2X1M" format — M=match, X=mismatch
 /// Offset: best starting position in text
@@ -269,11 +269,7 @@ pub fn smith_waterman(pattern: &[u8], text: &[u8]) -> (i32, String) {
 /// Returns (score_0_to_1, approximate_mismatch_count) for the best alignment.
 /// Uses bit-packed u64 to compare 31 bases per instruction.
 /// Fast path: pattern is packed into one u64, text is scanned in overlapping windows.
-pub fn bit_parallel_approx(
-    pattern: &[u8],
-    text: &[u8],
-    max_errors: usize,
-) -> (f64, usize) {
+pub fn bit_parallel_approx(pattern: &[u8], text: &[u8], max_errors: usize) -> (f64, usize) {
     if pattern.is_empty() || text.is_empty() || pattern.len() > 31 {
         return (0.0, usize::MAX);
     }
@@ -493,11 +489,7 @@ pub fn bit_vector_sw_scored(pattern: &[u8], text: &[u8]) -> (i32, usize) {
 /// Windowed bit-vector alignment for local alignment.
 /// Slides a window across text, finds best alignment score and position.
 /// Returns (best_match_count, best_offset).
-pub fn bit_vector_sw_windowed(
-    pattern: &[u8],
-    text: &[u8],
-    window: usize,
-) -> (i32, usize) {
+pub fn bit_vector_sw_windowed(pattern: &[u8], text: &[u8], window: usize) -> (i32, usize) {
     if pattern.is_empty() || text.is_empty() || pattern.len() > 31 {
         return (0, 0);
     }
@@ -528,7 +520,7 @@ pub fn bit_vector_sw_windowed(
 /// Myers' bit-vector edit distance with gap penalties.
 /// Supports affine-like gap costs for Nanopore-style error profiles.
 /// Pattern must fit in 31 bases (62 bits in u64).
-/// 
+///
 /// Returns (edit_distance, best_offset) where edit_distance accounts for
 /// mismatches and gaps with configurable penalties.
 #[allow(unused_variables, unused_assignments)]
@@ -609,10 +601,7 @@ pub fn myers_edit_distance_gaps(
 /// Uses Myers' algorithm extended with gap penalties.
 /// Returns (sw_score, best_offset, cigar_hint).
 #[allow(unused_variables, unused_assignments)]
-pub fn myers_edit_distance_nano(
-    pattern: &[u8],
-    text: &[u8],
-) -> (i32, usize, String) {
+pub fn myers_edit_distance_nano(pattern: &[u8], text: &[u8]) -> (i32, usize, String) {
     let m = pattern.len();
     let n = text.len();
 
@@ -661,7 +650,9 @@ pub fn myers_edit_distance_nano(
         ph = rh & mask;
         mh = rm;
 
-        let matches = m as i32 - ((ph & mask).count_ones() as i32 + (mh & 0x5555555555555555 & mask).count_ones() as i32);
+        let matches = m as i32
+            - ((ph & mask).count_ones() as i32
+                + (mh & 0x5555555555555555 & mask).count_ones() as i32);
         let score = 3 * matches - m as i32;
 
         if score > best_score {
@@ -675,8 +666,13 @@ pub fn myers_edit_distance_nano(
     let cigar = if best_score >= m as i32 {
         format!("{}M", m)
     } else {
-        let errors = m as i32 - (best_ph.count_ones() as i32 + (best_mh & 0x5555555555555555).count_ones() as i32);
-        let match_len = if errors > 0 { (m as i32 - errors).max(0) as usize } else { m };
+        let errors = m as i32
+            - (best_ph.count_ones() as i32 + (best_mh & 0x5555555555555555).count_ones() as i32);
+        let match_len = if errors > 0 {
+            (m as i32 - errors).max(0) as usize
+        } else {
+            m
+        };
         if errors <= 2 {
             format!("{}M{}X", m, errors)
         } else {
@@ -695,7 +691,7 @@ pub fn bit_alignment_score(pattern: &[u8], text_region: &[u8]) -> f64 {
         return 0.0;
     }
 
-   let m = pattern.len();
+    let m = pattern.len();
 
     // Fast path: pattern fits in u64, use bit-parallel comparison
     if m <= 31 && text_region.len() >= m {
@@ -750,9 +746,9 @@ pub fn simple_cigar(read_len: usize, _score: f64) -> String {
 
 /// Quality-aware 2-bit alignment with Phred-scaled mismatch penalties.
 /// High quality mismatches are penalized more than low quality ones.
-/// 
+///
 /// read_qual: per-base quality scores from the read (Phred+33 encoding, already subtracted by 33)
-/// 
+///
 /// Returns (adjusted_score_0_to_1, cigar_string, best_offset, quality_penalty).
 pub fn two_bit_align_with_quality(
     pattern: &[u8],
@@ -818,7 +814,7 @@ fn compute_quality_aware_score_at(xor_val: u64, len: usize, read_qual: &[u8]) ->
     let mut val = xor_val;
     for i in 0..len {
         let is_match = (val & 3) == 0;
-        
+
         if is_match {
             matches += 1;
         } else {
@@ -828,12 +824,12 @@ fn compute_quality_aware_score_at(xor_val: u64, len: usize, read_qual: &[u8]) ->
             } else {
                 20.0 // default Q20 for unknown positions
             };
-            
+
             // Scale: Q10 ≈ -0.5, Q20 ≈ -1.0, Q30 ≈ -1.5, Q40 ≈ -2.0
             let penalty = -(read_q / 20.0);
             mismatch_penalty += penalty;
         }
-        
+
         val >>= 2;
     }
 
@@ -882,7 +878,8 @@ pub fn two_bit_score_chunks_with_quality(
         let qual_len = (chunk_end).min(read_qual.len()).saturating_sub(qual_start);
         let chunk_qual = &read_qual[qual_start..qual_start.min(qual_len)];
 
-        let (chunk_score, _, _, penalty) = two_bit_align_with_quality(chunk, text_region, chunk_qual);
+        let (chunk_score, _, _, penalty) =
+            two_bit_align_with_quality(chunk, text_region, chunk_qual);
         total_score += chunk_score;
         total_penalty += penalty;
         chunks += 1;
@@ -898,7 +895,7 @@ pub fn two_bit_score_chunks_with_quality(
 /// Chunked Smith-Waterman with full traceback for long reads.
 /// Splits pattern into 31bp chunks, runs full SW with traceback on each,
 /// concatenates CIGAR strings from all chunks.
-/// 
+///
 /// Returns (best_score, combined_cigar_string).
 pub fn smith_waterman_chunked(pattern: &[u8], text: &[u8]) -> (i32, String) {
     let m = pattern.len();
@@ -915,7 +912,8 @@ pub fn smith_waterman_chunked(pattern: &[u8], text: &[u8]) -> (i32, String) {
     let mut all_ops: Vec<u8> = Vec::new();
 
     for chunk in pattern.chunks(chunk_size) {
-        let (chunk_score, chunk_cigar) = smith_waterman_internal(chunk, text, match_sc, mismatch_sc, gap_sc);
+        let (chunk_score, chunk_cigar) =
+            smith_waterman_internal(chunk, text, match_sc, mismatch_sc, gap_sc);
         total_score += chunk_score;
 
         if !chunk_cigar.is_empty() && chunk_score > 0 {
@@ -933,7 +931,13 @@ pub fn smith_waterman_chunked(pattern: &[u8], text: &[u8]) -> (i32, String) {
 }
 
 /// Internal Smith-Waterman with configurable scoring and full traceback.
-pub fn smith_waterman_internal(pattern: &[u8], text: &[u8], match_sc: i32, mismatch_sc: i32, gap_sc: i32) -> (i32, String) {
+pub fn smith_waterman_internal(
+    pattern: &[u8],
+    text: &[u8],
+    match_sc: i32,
+    mismatch_sc: i32,
+    gap_sc: i32,
+) -> (i32, String) {
     let m = pattern.len();
     let n = text.len();
 
@@ -994,9 +998,19 @@ pub fn smith_waterman_internal(pattern: &[u8], text: &[u8], match_sc: i32, misma
 
     while i > 0 && j > 0 && sc[i][j] > 0 {
         match dr[i][j] {
-            0 => { ops.push(0); i -= 1; j -= 1; }
-            1 => { ops.push(1); j -= 1; }
-            2 => { ops.push(2); i -= 1; }
+            0 => {
+                ops.push(0);
+                i -= 1;
+                j -= 1;
+            }
+            1 => {
+                ops.push(1);
+                j -= 1;
+            }
+            2 => {
+                ops.push(2);
+                i -= 1;
+            }
             _ => break,
         }
     }
@@ -1049,33 +1063,38 @@ pub fn build_cigar_string(ops: &[u8]) -> String {
         if op == current_op {
             count += 1;
         } else {
-            cigar.push_str(&format!("{}{}", count, match current_op {
-                0 => 'M',
-                1 => 'I',
-                2 => 'D',
-                _ => 'M',
-            }));
+            cigar.push_str(&format!(
+                "{}{}",
+                count,
+                match current_op {
+                    0 => 'M',
+                    1 => 'I',
+                    2 => 'D',
+                    _ => 'M',
+                }
+            ));
             current_op = op;
             count = 1;
         }
     }
 
-    cigar.push_str(&format!("{}{}", count, match current_op {
-        0 => 'M',
-        1 => 'I',
-        2 => 'D',
-        _ => 'M',
-    }));
+    cigar.push_str(&format!(
+        "{}{}",
+        count,
+        match current_op {
+            0 => 'M',
+            1 => 'I',
+            2 => 'D',
+            _ => 'M',
+        }
+    ));
 
     cigar
 }
 
 /// Smith-Waterman local alignment for scoring (returns normalized 0-1 score).
 /// Uses chunked approach for long reads (>31bp).
-pub fn smith_waterman_score(
-    pattern: &[u8],
-    text: &[u8],
-) -> (f64, usize) {
+pub fn smith_waterman_score(pattern: &[u8], text: &[u8]) -> (f64, usize) {
     let m = pattern.len();
     if m == 0 || text.is_empty() {
         return (0.0, 0);
@@ -1121,14 +1140,14 @@ pub fn smith_waterman_score(
 }
 
 /// Quality-aware Smith-Waterman local alignment with Phred-scaled mismatch penalties.
-/// 
+///
 /// Each mismatch is penalized proportionally to the read base's quality score:
 ///   - High quality mismatch (Q30): penalty ≈ -3.0
 ///   - Medium quality mismatch (Q20): penalty ≈ -2.0
 ///   - Low quality mismatch (Q10): penalty ≈ -1.0
-/// 
+///
 /// Gap penalties remain constant (gap_open, gap_extend).
-/// 
+///
 /// Returns (sw_score, cigar_string, best_offset_in_text, total_quality_penalty).
 pub fn smith_waterman_with_quality(
     pattern: &[u8],
@@ -1300,9 +1319,9 @@ pub fn smith_waterman_with_quality(
         }
     }
 
-    let best_offset = max_score_cell.1.saturating_sub(
-        ops.iter().filter(|&&op| op == 0 || op == 1).count()
-    );
+    let best_offset = max_score_cell
+        .1
+        .saturating_sub(ops.iter().filter(|&&op| op == 0 || op == 1).count());
 
     (final_score, cigar, best_offset, total_quality_penalty)
 }
@@ -1510,10 +1529,14 @@ mod tests {
         let t = encode_seq("ACGT");
         let score = bit_vector_sw(&p, &t);
         // Perfect match: bit-vector score should be positive (match=0 cost)
-        assert!(score > 0, "Perfect match should give positive score, got {}", score);
+        assert!(
+            score > 0,
+            "Perfect match should give positive score, got {}",
+            score
+        );
     }
 
-     #[test]
+    #[test]
     #[ignore] // Myers' bit-vector algorithm is not correct yet (known issue)
     fn test_bit_vector_no_match() {
         let p = encode_seq("AAAA");
@@ -1521,9 +1544,18 @@ mod tests {
         let no_match = bit_vector_sw(&p, &t);
         let perfect = bit_vector_sw(&encode_seq("AAAA"), &encode_seq("AAAA"));
         // No-match score should be much less than perfect match
-        assert!(no_match < perfect, "no_match {} should be < perfect {}", no_match, perfect);
+        assert!(
+            no_match < perfect,
+            "no_match {} should be < perfect {}",
+            no_match,
+            perfect
+        );
         // Should still be low (no shared bases)
-        assert!(no_match <= 1, "no_match should be very low, got {}", no_match);
+        assert!(
+            no_match <= 1,
+            "no_match should be very low, got {}",
+            no_match
+        );
     }
 
     #[test]
@@ -1534,7 +1566,12 @@ mod tests {
         // Partial match: should be positive but less than exact
         assert!(score > 0);
         let exact = bit_vector_sw(&p, &encode_seq("ACGT"));
-        assert!(score <= exact, "Partial {} should be <= exact {}", score, exact);
+        assert!(
+            score <= exact,
+            "Partial {} should be <= exact {}",
+            score,
+            exact
+        );
     }
 
     #[test]
@@ -1545,7 +1582,12 @@ mod tests {
         let score = bit_vector_sw(&p, &t);
         let exact = bit_vector_sw(&p, &encode_seq("ACGT"));
         // Embedded pattern should score as well as exact match
-        assert!(score >= exact, "Embedded {} should be >= exact {}", score, exact);
+        assert!(
+            score >= exact,
+            "Embedded {} should be >= exact {}",
+            score,
+            exact
+        );
     }
 
     #[test]
@@ -1562,7 +1604,12 @@ mod tests {
         let s_two = bit_vector_sw(&p, &two_diff);
         let s_all = bit_vector_sw(&p, &all_diff);
 
-        assert!(s_perfect >= s_one, "perfect {} >= one_diff {}", s_perfect, s_one);
+        assert!(
+            s_perfect >= s_one,
+            "perfect {} >= one_diff {}",
+            s_perfect,
+            s_one
+        );
         assert!(s_one >= s_two, "one_diff {} >= two_diff {}", s_one, s_two);
         assert!(s_two >= s_all, "two_diff {} >= all_diff {}", s_two, s_all);
 
@@ -1585,7 +1632,11 @@ mod tests {
         let (bv_score, _) = bit_vector_sw_scored(&p, &t);
         let (sw_score, _) = smith_waterman(&p, &t);
         // Both should detect the perfect local alignment
-        assert!(bv_score > 0, "BV scored should be positive, got {}", bv_score);
+        assert!(
+            bv_score > 0,
+            "BV scored should be positive, got {}",
+            bv_score
+        );
         assert!(sw_score > 0, "SW should be positive, got {}", sw_score);
     }
 
@@ -1595,9 +1646,17 @@ mod tests {
         let p = encode_seq("ACGT");
         let t = encode_seq("TTTTTTTTACGTTTTTTTTTTT");
         let (score, offset) = bit_vector_sw_windowed(&p, &t, 8);
-        assert!(score > 0, "Windowed score should be positive, got {}", score);
+        assert!(
+            score > 0,
+            "Windowed score should be positive, got {}",
+            score
+        );
         // Offset should be near where ACGT is (position 8), allow some tolerance
-        assert!(offset >= 6 && offset <= 10, "Expected offset near 8, got {}", offset);
+        assert!(
+            offset >= 6 && offset <= 10,
+            "Expected offset near 8, got {}",
+            offset
+        );
     }
 
     #[test]
@@ -1606,7 +1665,11 @@ mod tests {
         let p = encode_seq("ACGTACGTACGTACGTACGTACGTACGTACG");
         let t = encode_seq("ACGTACGTACGTACGTACGTACGTACGTACG");
         let score = bit_vector_sw(&p, &t);
-        assert!(score > 0, "Long exact match should score positive, got {}", score);
+        assert!(
+            score > 0,
+            "Long exact match should score positive, got {}",
+            score
+        );
     }
 
     #[test]
@@ -1737,12 +1800,20 @@ mod tests {
         let p = encode_seq("AAAA");
         let t = encode_seq("TTTT");
         let (score, _, _) = two_bit_align(&p, &t);
-        assert_eq!(score, 0.0, "AAAA vs TTTT must be exactly 0.0, got {}", score);
+        assert_eq!(
+            score, 0.0,
+            "AAAA vs TTTT must be exactly 0.0, got {}",
+            score
+        );
 
         // AAAA vs AAAA MUST give 1.0
         let t2 = encode_seq("AAAA");
         let (score2, _, _) = two_bit_align(&p, &t2);
-        assert_eq!(score2, 1.0, "AAAA vs AAAA must be exactly 1.0, got {}", score2);
+        assert_eq!(
+            score2, 1.0,
+            "AAAA vs AAAA must be exactly 1.0, got {}",
+            score2
+        );
     }
 
     #[test]
@@ -1901,7 +1972,8 @@ mod tests {
         let qual_low: Vec<u8> = vec![10; 8];
 
         let (_, _, _, pen_high) = smith_waterman_with_quality(&p, &perfect, &qual_high, 2, -2, 0);
-        let (_, _, _, pen_one_high) = smith_waterman_with_quality(&p, &one_diff, &qual_high, 2, -2, 0);
+        let (_, _, _, pen_one_high) =
+            smith_waterman_with_quality(&p, &one_diff, &qual_high, 2, -2, 0);
 
         // Perfect match should have no penalty
         assert_eq!(pen_high, 0.0);
@@ -1916,9 +1988,17 @@ mod tests {
         let p = encode_seq("ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"); // 40bp = 2 chunks of ~20
         let t = encode_seq("ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT");
         let (score, cigar) = smith_waterman_chunked(&p, &t);
-        assert!(score > 0, "Exact match should score positive, got {}", score);
+        assert!(
+            score > 0,
+            "Exact match should score positive, got {}",
+            score
+        );
         assert!(!cigar.is_empty(), "CIGAR should not be empty");
-        assert!(cigar.contains('M'), "CIGAR should contain M operation, got {}", cigar);
+        assert!(
+            cigar.contains('M'),
+            "CIGAR should contain M operation, got {}",
+            cigar
+        );
     }
 
     #[test]
@@ -1926,7 +2006,11 @@ mod tests {
         let p = encode_seq("ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"); // 56bp = ~2 chunks
         let t = encode_seq("ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT");
         let (score, cigar) = smith_waterman_chunked(&p, &t);
-        assert!(score > 0, "Exact match should score positive, got {}", score);
+        assert!(
+            score > 0,
+            "Exact match should score positive, got {}",
+            score
+        );
         assert!(cigar.contains('M'), "CIGAR should contain M, got {}", cigar);
     }
 
@@ -1964,13 +2048,21 @@ mod tests {
         // For reads <=31bp, chunked should give same result as standard SW
         let p = encode_seq("ACGTACGT");
         let t = encode_seq("AACGTACGTA");
-        
+
         let (std_score, std_cigar) = smith_waterman(&p, &t);
         let (chunk_score, chunk_cigar) = smith_waterman_chunked(&p, &t);
-        
+
         // Scores should be equal for short reads (single chunk)
-        assert_eq!(std_score, chunk_score, "Scores should match: {} vs {}", std_score, chunk_score);
-        assert_eq!(std_cigar, chunk_cigar, "CIGARs should match: {} vs {}", std_cigar, chunk_cigar);
+        assert_eq!(
+            std_score, chunk_score,
+            "Scores should match: {} vs {}",
+            std_score, chunk_score
+        );
+        assert_eq!(
+            std_cigar, chunk_cigar,
+            "CIGARs should match: {} vs {}",
+            std_cigar, chunk_cigar
+        );
     }
 
     #[test]
@@ -2008,9 +2100,15 @@ mod tests {
         assert_eq!(ops.len(), 17); // 10 + 2 + 5
 
         // Check pattern: 10 M's, 2 I's, 5 D's
-        for i in 0..10 { assert_eq!(ops[i], 0); } // M
-        for i in 10..12 { assert_eq!(ops[i], 1); } // I
-        for i in 12..17 { assert_eq!(ops[i], 2); } // D
+        for i in 0..10 {
+            assert_eq!(ops[i], 0);
+        } // M
+        for i in 10..12 {
+            assert_eq!(ops[i], 1);
+        } // I
+        for i in 12..17 {
+            assert_eq!(ops[i], 2);
+        } // D
     }
 
     #[test]

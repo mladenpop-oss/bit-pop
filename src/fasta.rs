@@ -37,7 +37,7 @@ impl FastaReader {
                 self.buffer.clear();
                 match self.reader.read_line(&mut self.buffer) {
                     Ok(0) => return None,
-                    Ok(_) => {},
+                    Ok(_) => {}
                     Err(e) => return Some(Err(e)),
                 }
 
@@ -61,7 +61,7 @@ impl FastaReader {
             self.buffer.clear();
             match self.reader.read_line(&mut self.buffer) {
                 Ok(0) => break,
-                Ok(_) => {},
+                Ok(_) => {}
                 Err(e) => return Some(Err(e)),
             }
 

@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io::{self, Write};
 
-use crate::{MappingResult, PairedMappingResult, InsertSizeStats, QualityMappingResult};
+use crate::{InsertSizeStats, MappingResult, PairedMappingResult, QualityMappingResult};
 
 /// SAM FLAG bits
 pub mod flag {
@@ -71,13 +71,13 @@ impl SamWriter {
         writeln!(
             self.file,
             "{}\t{}\t{}\t{}\t{}\t{}\t*\t0\t0\t{}\t*",
-            read_name,        // QNAME
-            sam_flag,         // FLAG
-            genome_name,      // RNAME
-            pos,              // POS (1-based)
-            mapq,             // MAPQ
-            result.cigar,     // CIGAR
-            read_seq,         // SEQ
+            read_name,    // QNAME
+            sam_flag,     // FLAG
+            genome_name,  // RNAME
+            pos,          // POS (1-based)
+            mapq,         // MAPQ
+            result.cigar, // CIGAR
+            read_seq,     // SEQ
         )
     }
 
@@ -132,7 +132,13 @@ impl SamWriter {
                 read_name,
                 flag::UNMAPPED,
                 read_seq,
-                String::from_utf8_lossy(&results.first().map(|r| &r.quality_scores).cloned().unwrap_or_default()),
+                String::from_utf8_lossy(
+                    &results
+                        .first()
+                        .map(|r| &r.quality_scores)
+                        .cloned()
+                        .unwrap_or_default()
+                ),
             )?;
             return Ok(());
         }
@@ -238,7 +244,16 @@ impl SamWriter {
                 writeln!(
                     self.file,
                     "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t*",
-                    read_name, flag1, rname1, pos1, mapq1, map1.cigar, mate_name, pos2, tlen, map2.cigar
+                    read_name,
+                    flag1,
+                    rname1,
+                    pos1,
+                    mapq1,
+                    map1.cigar,
+                    mate_name,
+                    pos2,
+                    tlen,
+                    map2.cigar
                 )?;
 
                 writeln!(
@@ -350,7 +365,10 @@ mod tests {
         drop(writer);
 
         let mut content = String::new();
-        std::fs::File::open(&path).unwrap().read_to_string(&mut content).unwrap();
+        std::fs::File::open(&path)
+            .unwrap()
+            .read_to_string(&mut content)
+            .unwrap();
         let _ = std::fs::remove_file(&path);
 
         let lines: Vec<&str> = content.trim().lines().collect();
@@ -378,16 +396,19 @@ mod tests {
         drop(writer);
 
         let mut content = String::new();
-        std::fs::File::open(&path).unwrap().read_to_string(&mut content).unwrap();
+        std::fs::File::open(&path)
+            .unwrap()
+            .read_to_string(&mut content)
+            .unwrap();
         let _ = std::fs::remove_file(&path);
 
         let line = content.trim();
         let fields: Vec<&str> = line.split('\t').collect();
-        assert_eq!(fields[0], "read1");   // QNAME
-        assert_eq!(fields[1], "0");       // FLAG (no flags)
-        assert_eq!(fields[2], "chr1");    // RNAME
-        assert_eq!(fields[3], "101");     // POS (1-based)
-        assert_eq!(fields[5], "50M");     // CIGAR
+        assert_eq!(fields[0], "read1"); // QNAME
+        assert_eq!(fields[1], "0"); // FLAG (no flags)
+        assert_eq!(fields[2], "chr1"); // RNAME
+        assert_eq!(fields[3], "101"); // POS (1-based)
+        assert_eq!(fields[5], "50M"); // CIGAR
         assert_eq!(fields[9], "ACGTACGT"); // SEQ
     }
 
@@ -421,7 +442,10 @@ mod tests {
         drop(writer);
 
         let mut content = String::new();
-        std::fs::File::open(&path).unwrap().read_to_string(&mut content).unwrap();
+        std::fs::File::open(&path)
+            .unwrap()
+            .read_to_string(&mut content)
+            .unwrap();
         let _ = std::fs::remove_file(&path);
 
         let lines: Vec<&str> = content.trim().lines().collect();
@@ -447,15 +471,18 @@ mod tests {
         drop(writer);
 
         let mut content = String::new();
-        std::fs::File::open(&path).unwrap().read_to_string(&mut content).unwrap();
+        std::fs::File::open(&path)
+            .unwrap()
+            .read_to_string(&mut content)
+            .unwrap();
         let _ = std::fs::remove_file(&path);
 
         let line = content.trim();
         let fields: Vec<&str> = line.split('\t').collect();
         assert_eq!(fields[0], "read1");
-        assert_eq!(fields[1], "4");        // FLAG: UNMAPPED
-        assert_eq!(fields[2], "*");        // RNAME: unmapped
-        assert_eq!(fields[5], "*");        // CIGAR: unmapped
+        assert_eq!(fields[1], "4"); // FLAG: UNMAPPED
+        assert_eq!(fields[2], "*"); // RNAME: unmapped
+        assert_eq!(fields[5], "*"); // CIGAR: unmapped
     }
 
     #[test]
@@ -478,7 +505,10 @@ mod tests {
         drop(writer);
 
         let mut content = String::new();
-        std::fs::File::open(&path).unwrap().read_to_string(&mut content).unwrap();
+        std::fs::File::open(&path)
+            .unwrap()
+            .read_to_string(&mut content)
+            .unwrap();
         let _ = std::fs::remove_file(&path);
 
         let fields: Vec<&str> = content.trim().split('\t').collect();

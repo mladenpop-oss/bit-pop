@@ -506,7 +506,10 @@ impl BlockCompressedPositions {
 
         let mut offset = 0;
         let first_val = match vli_decode(&block_data[offset..]) {
-            Some((v, c)) => { offset = c; v }
+            Some((v, c)) => {
+                offset = c;
+                v
+            }
             None => return false,
         };
 
@@ -558,7 +561,10 @@ impl BlockCompressedPositions {
 
             let first_val = match vli_decode(block_data) {
                 Some((v, _)) => v,
-                None => { hi = mid; continue; }
+                None => {
+                    hi = mid;
+                    continue;
+                }
             };
 
             if first_val <= target {
@@ -607,7 +613,10 @@ impl BlockCompressedPositions {
 }
 
 /// Compress positions into independent blocks with skip index.
-pub fn compress_positions_blocked(positions: &[u32], block_size: usize) -> BlockCompressedPositions {
+pub fn compress_positions_blocked(
+    positions: &[u32],
+    block_size: usize,
+) -> BlockCompressedPositions {
     if positions.is_empty() {
         return BlockCompressedPositions {
             data: Vec::new(),
@@ -953,7 +962,7 @@ mod tests {
         assert_eq!(blocked.decompress_all(), vec![42]);
     }
 
-   #[test]
+    #[test]
     fn test_block_num_positions() {
         let positions = vec![0, 1, 2, 5, 100, 101, 103, 200];
         let blocked = compress_positions_blocked(&positions, 3);
