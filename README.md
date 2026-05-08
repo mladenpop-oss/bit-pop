@@ -84,13 +84,32 @@ See [Usage](#usage) for full documentation.
 
 ## Installation
 
-### Prerequisites
+### Homebrew (macOS/Linux)
+
+```bash
+brew tap mladenpop-oss/homebrew-bit-pop
+brew install bit-pop
+```
+
+### Cargo
+
+```bash
+cargo install bit-pop
+```
+
+### Pre-built Binaries
+
+Download from [GitHub Releases](https://github.com/mladenpop-oss/bit-pop/releases).
+
+### From Source
+
+#### Prerequisites
 
 - Rust toolchain (2021 edition)
 
-### Build
-
 ```bash
+git clone https://github.com/mladenpop-oss/bit-pop.git
+cd bit-pop
 cargo build --release
 ```
 
@@ -305,13 +324,13 @@ Benchmark on the CAMI I Low Complexity dataset — 50K reads across 62 microbial
 │   └── bitpop-workflow.py  # Multi-index workflow tool
 ├── data/
 │   ├── genomes/            # Reference genomes (.fna, .fasta)
-│   ├── reads/              # Sequencing reads (.fastq)
-│   └── indices/            # Generated index files (.bitpop)
+│   └── reads/              # Sequencing reads (.fastq)
 ├── docs/
 │   ├── paper.tex           # Academic paper
 │   ├── paper.pdf           # Compiled paper
 │   ├── references.bib      # Bibliography
 │   └── CITATION.cff        # Citation metadata
+├── bioconda-recipe/        # Conda package recipe (future)
 ├── Cargo.toml              # Rust project configuration
 └── README.md               # This file
 ```

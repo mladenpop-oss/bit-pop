@@ -1,0 +1,25 @@
+{% set name = "bit-pop" %}
+{% set version = "0.2.0" %}
+
+package:
+  name: "{{ name|lower }}"
+  version: "{{ version }}"
+
+source:
+  url: "https://github.com/mladenpop-oss/bit-pop/releases/download/v{{ version }}/bit-pop-x86_64-linux.tar.gz"
+  sha256: "PLACEHOLDER_SHA256"
+
+about:
+  home: "https://github.com/mladenpop-oss/bit-pop"
+  license: "MIT"
+  license_file: LICENSE
+  summary: "Ultra-fast multi-genome DNA read classification"
+  doc_url: "https://github.com/mladenpop-oss/bit-pop"
+
+dependencies:
+  - openssl
+  - zlib
+
+extra:
+  recipe-maintainers:
+    - mladenpop-oss
