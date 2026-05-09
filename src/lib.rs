@@ -194,6 +194,92 @@ pub fn decode_kmer(encoded: u64, k: usize) -> String {
     result.chars().rev().collect()
 }
 
+/// Generate all k-mer variants with up to `max_mismatches` substitutions.
+/// Returns unique encoded k-mer values (excluding the original).
+/// Uses 0-indexed encoding internally (A=0, C=1, G=2, T=3).
+/// Caller must convert to 1-indexed when querying FM-index.
+pub fn generate_kmer_variants(original: u64, k: usize, max_mismatches: usize) -> Vec<u64> {
+    if k > 31 || max_mismatches == 0 {
+        return Vec::new();
+    }
+
+    let bases: [u64; 4] = [0, 1, 2, 3]; // A, C, G, T (0-indexed)
+    let mut variants = std::collections::HashSet::new();
+
+    // Encode: first base is at MSB, last base is at LSB
+    // Position 0 (first base) -> bits (2*(k-1), 2*k-1)
+    // Position k-1 (last base) -> bits (0, 1)
+    let mut positions = Vec::with_capacity(k);
+    for i in 0..k {
+        let bit_pos = 2 * (k - 1 - i); // MSB-first mapping
+        let base = (original >> bit_pos) & 3;
+        positions.push((i, base as usize));
+    }
+
+    generate_variants_recursive(
+        &positions,
+        0,
+        0,
+        max_mismatches,
+        &bases,
+        original,
+        &mut variants,
+    );
+
+    variants.into_iter().collect()
+}
+
+fn generate_variants_recursive(
+    positions: &[(usize, usize)],
+    pos_idx: usize,
+    mismatches: usize,
+    max_mismatches: usize,
+    bases: &[u64; 4],
+    current: u64,
+    variants: &mut std::collections::HashSet<u64>,
+) {
+    if mismatches > max_mismatches {
+        return;
+    }
+
+    if pos_idx == positions.len() {
+        if mismatches > 0 {
+            variants.insert(current);
+        }
+        return;
+    }
+
+    let (array_idx, original_base) = positions[pos_idx];
+    let bit_pos = 2 * (positions.len() - 1 - array_idx); // MSB-first mapping
+
+    // Try each base (including original)
+    for &base in bases.iter() {
+        let new_mismatches = if base as usize == original_base {
+            mismatches
+        } else {
+            mismatches + 1
+        };
+
+        if new_mismatches > max_mismatches {
+            continue;
+        }
+
+        // Clear the old bits (2 bits per base) and set new bits at this position
+        let cleared = current & !(3u64 << bit_pos);
+        let new_current = cleared | ((base & 3) << bit_pos); // Mask to 2 bits
+
+        generate_variants_recursive(
+            positions,
+            pos_idx + 1,
+            new_mismatches,
+            max_mismatches,
+            bases,
+            new_current,
+            variants,
+        );
+    }
+}
+
 /// Compute reverse complement of a DNA string.
 /// A<->T, C<->G, then reverse the string.
 pub fn reverse_complement(seq: &str) -> String {
@@ -374,6 +460,20 @@ pub enum AlignMode {
     Hybrid,
 }
 
+/// Fuzzy k-mer matching method for improved strain resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FuzzyMethod {
+    /// No fuzzy matching (default)
+    #[default]
+    None,
+    /// Generate all k-mer variants with N mismatches and query FM-index for each
+    FuzzyKmer,
+    /// Allow N mismatches in spaced seed "match" positions
+    FuzzySeed,
+    /// Build neighborhood hash table at index build time for O(1) fuzzy lookup
+    Neighborhood,
+}
+
 impl fmt::Display for AlignMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -449,6 +549,15 @@ pub struct BitPop {
 
     /// Read type: "short" or "long"
     read_type: String,
+
+    /// Fuzzy k-mer matching method for improved strain resolution
+    fuzzy_method: FuzzyMethod,
+
+    /// Maximum number of mismatches allowed in fuzzy matching (default: 1)
+    fuzzy_mismatches: usize,
+
+    /// Neighborhood hash table for O(1) fuzzy k-mer lookup (populated during build)
+    neighborhood_hash: Option<HashMap<u64, Vec<(u64, u32, u64)>>>,
 }
 
 impl BitPop {
@@ -481,6 +590,9 @@ impl BitPop {
                 true,
             ],
             read_type: "short".to_string(),
+            fuzzy_method: FuzzyMethod::None,
+            fuzzy_mismatches: 1,
+            neighborhood_hash: None,
         }
     }
 
@@ -545,6 +657,16 @@ impl BitPop {
         self.read_type = read_type.to_lowercase();
     }
 
+    /// Set the fuzzy k-mer matching method.
+    pub fn set_fuzzy_method(&mut self, method: FuzzyMethod) {
+        self.fuzzy_method = method;
+    }
+
+    /// Set the maximum number of mismatches for fuzzy matching.
+    pub fn set_fuzzy_mismatches(&mut self, mismatches: usize) {
+        self.fuzzy_mismatches = mismatches.max(1);
+    }
+
     /// Add a genome (reference sequence) to the index.
     ///
     /// Returns the assigned genome_id (0-based, sequential).
@@ -605,6 +727,10 @@ impl BitPop {
             .map(|(_, name, seq)| (name, seq))
             .collect();
         self.fm_index = Some(FmIndex::build(&genomes));
+
+        if matches!(self.fuzzy_method, FuzzyMethod::Neighborhood) {
+            self.build_neighborhood_hash();
+        }
     }
 
     /// Finalize the index with parallel FM-Index build using rayon.
@@ -633,6 +759,10 @@ impl BitPop {
             .collect();
 
         self.fm_index = Some(FmIndex::build_parallel(&genome_refs));
+
+        if matches!(self.fuzzy_method, FuzzyMethod::Neighborhood) {
+            self.build_neighborhood_hash();
+        }
     }
 
     /// Load genomes from a FASTA file.
@@ -1260,6 +1390,218 @@ impl BitPop {
         candidates
     }
 
+    /// Find the top-N rarest k-mers with fuzzy matching (up to N mismatches).
+    /// Generates all k-mer variants and queries FM-index for each, aggregating counts.
+    fn find_top_n_rarest_kmers_fuzzy(
+        &self,
+        encoded: &[u8],
+        fm: &FmIndex,
+        max_hits: usize,
+    ) -> Vec<(usize, Vec<u8>, usize)> {
+        if encoded.len() < self.k {
+            return Vec::new();
+        }
+
+        let mut candidates: Vec<(usize, Vec<u8>, usize)> = Vec::new();
+
+        for i in 0..=(encoded.len() - self.k) {
+            let kmer_bytes = &encoded[i..i + self.k];
+            let kmer_encoded = Self::encode_kmer_bytes_0indexed(self, kmer_bytes);
+
+            let variants = generate_kmer_variants(kmer_encoded, self.k, self.fuzzy_mismatches);
+            let all_variants: Vec<u64> = std::iter::once(kmer_encoded)
+                .chain(variants)
+                .collect();
+
+            let mut total_count = 0usize;
+            let mut found_any = false;
+
+            for variant in &all_variants {
+                let variant_bytes = Self::kmer_0indexed_to_fm_bytes(*variant, self.k);
+                let count = fm.count_occurrences(&variant_bytes);
+                if count > 0 && count <= max_hits {
+                    total_count += count;
+                    found_any = true;
+                }
+            }
+
+            if found_any {
+                candidates.push((i, kmer_bytes.to_vec(), total_count));
+            }
+        }
+
+        candidates.sort_by_key(|&(_, _, count)| count);
+
+        let n = self.top_n.min(candidates.len());
+        candidates.truncate(n);
+        candidates
+    }
+
+    /// Find the top-N rarest spaced k-mers with fuzzy matching.
+    /// Allows mismatches in the "match" positions of the spaced seed.
+    fn find_top_n_rarest_kmers_spaced_fuzzy(
+        &self,
+        encoded: &[u8],
+        fm: &FmIndex,
+        max_hits: usize,
+    ) -> Vec<(usize, Vec<u8>, usize)> {
+        if encoded.len() < self.spaced_seed_pattern.len() {
+            return Vec::new();
+        }
+
+        let mut candidates: Vec<(usize, Vec<u8>, usize)> = Vec::new();
+
+        for i in 0..=(encoded.len() - self.spaced_seed_pattern.len()) {
+            let window = &encoded[i..i + self.spaced_seed_pattern.len()];
+            let spaced_kmer: Vec<u8> = window
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| self.spaced_seed_pattern[*j])
+                .map(|(_, &b)| b)
+                .collect();
+
+            let count = fm.count_occurrences_spaced_fuzzy(
+                window,
+                &self.spaced_seed_pattern,
+                self.fuzzy_mismatches,
+            );
+            if count > 0 && count <= max_hits {
+                candidates.push((i, spaced_kmer, count));
+            }
+        }
+
+        candidates.sort_by_key(|&(_, _, count)| count);
+
+        let n = self.top_n.min(candidates.len());
+        candidates.truncate(n);
+        candidates
+    }
+
+    /// Build a neighborhood hash table for O(1) fuzzy k-mer lookup.
+    /// Maps each k-mer variant (with N mismatches) to its original k-mer and positions.
+    fn build_neighborhood_hash(&mut self) {
+        if self.fm_index.is_none() {
+            return;
+        }
+
+        if self.fuzzy_mismatches == 0 {
+            return;
+        }
+
+        let mut hash_table = HashMap::new();
+
+        for (&genome_id, seq) in &self.genomes {
+            for i in 0..=seq.len().saturating_sub(self.k) {
+                let kmer_bytes = &seq[i..i + self.k];
+                let kmer_encoded = Self::encode_kmer_bytes(self, kmer_bytes);
+
+                let variants = generate_kmer_variants(kmer_encoded, self.k, self.fuzzy_mismatches);
+                let all_variants: Vec<u64> = std::iter::once(kmer_encoded)
+                    .chain(variants)
+                    .collect();
+
+                for variant in all_variants {
+                    let entry = (variant, genome_id, i as u64);
+                    hash_table
+                        .entry(variant)
+                        .or_insert_with(Vec::new)
+                        .push(entry);
+                }
+            }
+        }
+
+        self.neighborhood_hash = Some(hash_table);
+    }
+
+    /// Find the top-N rarest k-mers using neighborhood hash table.
+    fn find_top_n_rarest_kmers_neighborhood(
+        &self,
+        encoded: &[u8],
+        fm: &FmIndex,
+        max_hits: usize,
+    ) -> Vec<(usize, Vec<u8>, usize)> {
+        let hash_table = match &self.neighborhood_hash {
+            Some(table) => table,
+            None => return self.find_top_n_rarest_kmers(encoded, fm, max_hits),
+        };
+
+        let mut position_counts: HashMap<u64, usize> = HashMap::new();
+
+        for i in 0..=(encoded.len() - self.k) {
+            let kmer_bytes = &encoded[i..i + self.k];
+            let kmer_encoded = Self::encode_kmer_bytes(self, kmer_bytes);
+
+            let variants = generate_kmer_variants(kmer_encoded, self.k, self.fuzzy_mismatches);
+            let all_variants: Vec<u64> = std::iter::once(kmer_encoded)
+                .chain(variants)
+                .collect();
+
+            for variant in all_variants {
+                if let Some(entries) = hash_table.get(&variant) {
+                    for &(_, genome_id, pos) in entries {
+                        let packed = ((genome_id as u64) << 32) | (pos & 0xFFFFFFFF);
+                        *position_counts.entry(packed).or_default() += 1;
+                    }
+                }
+            }
+        }
+
+        let mut candidates: Vec<(usize, Vec<u8>, usize)> = Vec::new();
+        for (i, kmer_bytes) in encoded.windows(self.k).enumerate() {
+            let kmer_encoded = Self::encode_kmer_bytes(self, kmer_bytes);
+            let variants = generate_kmer_variants(kmer_encoded, self.k, self.fuzzy_mismatches);
+            let all_variants: Vec<u64> = std::iter::once(kmer_encoded)
+                .chain(variants)
+                .collect();
+
+            let mut total_positions: std::collections::HashSet<u64> = std::collections::HashSet::new();
+            for variant in all_variants {
+                if let Some(entries) = hash_table.get(&variant) {
+                    for &(_, _, pos) in entries {
+                        total_positions.insert(pos);
+                    }
+                }
+            }
+
+            if !total_positions.is_empty() {
+                let count = total_positions.len().min(max_hits);
+                candidates.push((i, kmer_bytes.to_vec(), count));
+            }
+        }
+
+        candidates.sort_by_key(|&(_, _, count)| count);
+
+        let n = self.top_n.min(candidates.len());
+        candidates.truncate(n);
+        candidates
+    }
+
+   /// Encode bytes (1-indexed A=1,C=2,G=3,T=4) into u64 (0-indexed internally).
+    fn encode_kmer_bytes_0indexed(&self, bytes: &[u8]) -> u64 {
+        let mut result: u64 = 0;
+        for &b in bytes {
+            result = (result << 2) | ((b.saturating_sub(1)) as u64);
+        }
+        result
+    }
+
+    /// Convert 0-indexed u64 k-mer to 1-indexed bytes for FM-index queries.
+    pub fn kmer_0indexed_to_fm_bytes(encoded: u64, k: usize) -> Vec<u8> {
+        let mut result = Vec::with_capacity(k);
+        for i in (0..k).rev() {
+            let base = ((encoded >> (2 * i)) & 3) + 1;
+            result.push(base as u8);
+        }
+        result
+    }
+
+    /// Helper: encode a u64 k-mer back to bytes for FM-index queries.
+    /// Encoding: first base is at MSB, last base is at LSB
+    /// Note: FM-index uses 1-indexed encoding (A=1, C=2, G=3, T=4)
+    pub fn kmer_encoded_to_bytes(encoded: u64, k: usize) -> Vec<u8> {
+        Self::kmer_0indexed_to_fm_bytes(encoded, k)
+    }
+
     /// Anchor-based filter using the rarest k-mer + 2-bit XOR scoring.
     ///
     /// Algorithm:
@@ -1315,10 +1657,27 @@ impl BitPop {
             return Vec::new();
         }
 
-        let top_n_kmers = if self.use_spaced_seed {
-            self.find_top_n_rarest_kmers_spaced(&encoded, fm, max_hits)
-        } else {
-            self.find_top_n_rarest_kmers(&encoded, fm, max_hits)
+        let top_n_kmers = match self.fuzzy_method {
+            FuzzyMethod::FuzzyKmer => {
+                self.find_top_n_rarest_kmers_fuzzy(&encoded, fm, max_hits)
+            }
+            FuzzyMethod::FuzzySeed => {
+                if self.use_spaced_seed {
+                    self.find_top_n_rarest_kmers_spaced_fuzzy(&encoded, fm, max_hits)
+                } else {
+                    self.find_top_n_rarest_kmers_fuzzy(&encoded, fm, max_hits)
+                }
+            }
+            FuzzyMethod::Neighborhood => {
+                self.find_top_n_rarest_kmers_neighborhood(&encoded, fm, max_hits)
+            }
+            FuzzyMethod::None => {
+                if self.use_spaced_seed {
+                    self.find_top_n_rarest_kmers_spaced(&encoded, fm, max_hits)
+                } else {
+                    self.find_top_n_rarest_kmers(&encoded, fm, max_hits)
+                }
+            }
         };
         if top_n_kmers.is_empty() {
             return Vec::new();
@@ -1480,7 +1839,24 @@ impl BitPop {
             return Vec::new();
         }
 
-        let top_n_kmers = self.find_top_n_rarest_kmers(&encoded, fm, max_hits);
+        let top_n_kmers = match self.fuzzy_method {
+            FuzzyMethod::FuzzyKmer => {
+                self.find_top_n_rarest_kmers_fuzzy(&encoded, fm, max_hits)
+            }
+            FuzzyMethod::FuzzySeed => {
+                if self.use_spaced_seed {
+                    self.find_top_n_rarest_kmers_spaced_fuzzy(&encoded, fm, max_hits)
+                } else {
+                    self.find_top_n_rarest_kmers_fuzzy(&encoded, fm, max_hits)
+                }
+            }
+            FuzzyMethod::Neighborhood => {
+                self.find_top_n_rarest_kmers_neighborhood(&encoded, fm, max_hits)
+            }
+            FuzzyMethod::None => {
+                self.find_top_n_rarest_kmers(&encoded, fm, max_hits)
+            }
+        };
         if top_n_kmers.is_empty() {
             return Vec::new();
         }
@@ -2214,6 +2590,9 @@ impl BitPop {
                 true,
             ],
             read_type: "short".to_string(),
+            fuzzy_method: FuzzyMethod::None,
+            fuzzy_mismatches: 1,
+            neighborhood_hash: None,
         }
     }
 
@@ -3540,7 +3919,7 @@ mod tests {
         bp.add_genome("test", "ACGTACGTACGTACGT");
         bp.build();
 
-        let (score, cigar, _) = bp.align_read_sw("ACGTACGT", 0, 0);
+        let (_score, cigar, _) = bp.align_read_sw("ACGTACGT", 0, 0);
         assert_eq!(cigar, "8M");
     }
 
@@ -4052,5 +4431,134 @@ mod tests {
         let results = bp.map_read_with_mode(read, AlignMode::Xor, 5);
         assert!(!results.is_empty());
         assert_eq!(results[0].genome_id, 0);
+    }
+
+    #[test]
+    fn test_generate_kmer_variants_basic() {
+        let kmer = encode_kmer("ACGT").unwrap();
+        let variants = generate_kmer_variants(kmer, 4, 1);
+        assert!(variants.len() > 0, "should generate variants");
+        assert!(!variants.contains(&kmer), "variants should not contain original");
+        
+        // Verify one variant has exactly 1 mismatch
+        let variant = variants[0];
+        let original_decoded = decode_kmer(kmer, 4);
+        let variant_decoded = decode_kmer(variant, 4);
+        let mismatch_count = original_decoded
+            .chars()
+            .zip(variant_decoded.chars())
+            .filter(|&(a, b)| a != b)
+            .count();
+        assert_eq!(mismatch_count, 1, "variant should have exactly 1 mismatch");
+    }
+
+    #[test]
+    fn test_fuzzy_kmer_find_in_index() {
+        let mut bp = BitPop::new(4);
+        // Genome contains ACGT and CGTG (1 mismatch from ACGT at position 2)
+        bp.add_genome("test", "ACGTACGTACGTCGTG");
+        bp.build();
+
+        let fm = bp.fm_index.as_ref().unwrap();
+        
+        // Original k-mer should be found
+        let kmer_bytes = BitPop::kmer_encoded_to_bytes(encode_kmer("ACGT").unwrap(), 4);
+        let count = fm.count_occurrences(&kmer_bytes);
+        assert!(count > 0, "original kmer should be found (count={})", count);
+
+        // Variant CGTG (1 mismatch at position 2: G->T) should be found
+        let variant_bytes = BitPop::kmer_encoded_to_bytes(encode_kmer("CGTG").unwrap(), 4);
+        let count = fm.count_occurrences(&variant_bytes);
+        assert!(count > 0, "variant CGTG should be found (count={})", count);
+    }
+
+    #[test]
+    fn test_generate_kmer_variants_no_mismatches() {
+        let kmer = encode_kmer("ACGT").unwrap();
+        let variants = generate_kmer_variants(kmer, 4, 0);
+        assert_eq!(variants.len(), 0);
+    }
+
+    #[test]
+    fn test_generate_kmer_variants_k_too_long() {
+        // k > 31 should return empty
+        let variants = generate_kmer_variants(0, 32, 1);
+        assert_eq!(variants.len(), 0);
+    }
+
+    #[test]
+    fn test_fuzzy_method_enum_default() {
+        let method: FuzzyMethod = Default::default();
+        assert_eq!(method, FuzzyMethod::None);
+    }
+
+    #[test]
+    fn test_set_fuzzy_method() {
+        let mut bp = BitPop::new(10);
+        bp.set_fuzzy_method(FuzzyMethod::FuzzyKmer);
+        bp.set_fuzzy_mismatches(2);
+        assert_eq!(bp.fuzzy_mismatches, 2);
+    }
+
+     #[test]
+    fn test_anchor_filter_fuzzy_kmer() {
+        let mut bp = BitPop::new(6);
+        bp.add_genome("test", "AACCGGTACGTACGTAACCGGTTTC");
+        bp.build();
+
+        bp.set_fuzzy_method(FuzzyMethod::FuzzyKmer);
+        bp.set_fuzzy_mismatches(1);
+
+        // Test that regular kmer filter works first
+        let fm = bp.fm_index.as_ref().unwrap();
+        let encoded = encode_sequence("ACGTAC");
+        let regular_candidates = bp.find_top_n_rarest_kmers(&encoded, fm, usize::MAX);
+        assert!(!regular_candidates.is_empty(), "regular kmer filter should find candidates");
+
+        let fuzzy_candidates = bp.find_top_n_rarest_kmers_fuzzy(&encoded, fm, usize::MAX);
+        assert!(!fuzzy_candidates.is_empty(), "fuzzy kmer filter should find candidates");
+        
+        let scored = bp.anchor_filter("ACGTAC", 0.5);
+        assert!(!scored.is_empty(), "Fuzzy anchor_filter should find matches");
+    }
+
+    #[test]
+    fn test_anchor_filter_fuzzy_seed() {
+        let mut bp = BitPop::new(6);
+        bp.add_genome("test", "AACCGGTACGTACGTAACCGGTTTC");
+        bp.build();
+
+        bp.set_spaced_seed(true);
+        bp.set_fuzzy_method(FuzzyMethod::FuzzySeed);
+        bp.set_fuzzy_mismatches(1);
+
+        // Just verify it doesn't panic and returns results
+        let scored = bp.anchor_filter("ACGTAC", 0.3);
+        // Note: fuzzy seed may or may not find matches depending on the seed pattern
+        // The important thing is that it doesn't panic
+        let _ = scored;
+    }
+
+    #[test]
+    fn test_build_neighborhood_hash() {
+        let mut bp = BitPop::new(6);
+        bp.add_genome("test", "AACCGGTACGTACGTAACCGGTTTC");
+        bp.set_fuzzy_method(FuzzyMethod::Neighborhood);
+        bp.set_fuzzy_mismatches(1);
+        bp.build();
+
+        assert!(bp.neighborhood_hash.is_some());
+    }
+
+    #[test]
+    fn test_anchor_filter_neighborhood() {
+        let mut bp = BitPop::new(6);
+        bp.add_genome("test", "AACCGGTACGTACGTAACCGGTTTC");
+        bp.set_fuzzy_method(FuzzyMethod::Neighborhood);
+        bp.set_fuzzy_mismatches(1);
+        bp.build();
+
+        let scored = bp.anchor_filter("ACGTAC", 0.5);
+        assert!(!scored.is_empty(), "Neighborhood anchor_filter should find matches");
     }
 }

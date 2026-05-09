@@ -1867,7 +1867,7 @@ mod tests {
         let p = encode_seq("ACGT");
         let t = encode_seq("AACGTT"); // ACGT embedded with flanking bases
         let qual: Vec<u8> = vec![30, 30, 30, 30]; // high quality
-        let (score, cigar, _, penalty) = smith_waterman_with_quality(&p, &t, &qual, 2, -2, 0);
+        let (score, _cigar, _, penalty) = smith_waterman_with_quality(&p, &t, &qual, 2, -2, 0);
         // SW should find ACGT match with score=8, no mismatches in the alignment path
         assert_eq!(score, 8);
         assert_eq!(penalty, 0.0); // perfect local alignment = no penalty
@@ -1969,7 +1969,7 @@ mod tests {
         let one_diff = encode_seq("AACGTACGTA");
 
         let qual_high: Vec<u8> = vec![30; 8];
-        let qual_low: Vec<u8> = vec![10; 8];
+        let _qual_low: Vec<u8> = vec![10; 8];
 
         let (_, _, _, pen_high) = smith_waterman_with_quality(&p, &perfect, &qual_high, 2, -2, 0);
         let (_, _, _, pen_one_high) =
@@ -2132,7 +2132,7 @@ mod tests {
         // Mismatch case
         let p2 = encode_seq("ACGT");
         let t2 = encode_seq("ACGA");
-        let (score2, cigar2) = smith_waterman_internal(&p2, &t2, 2, -1, -2);
+        let (score2, _cigar2) = smith_waterman_internal(&p2, &t2, 2, -1, -2);
         // Local alignment finds ACG match (score=6), T vs A worse than stopping
         assert_eq!(score2, 6);
     }

@@ -7,7 +7,7 @@ package:
 
 source:
   url: "https://github.com/mladenpop-oss/bit-pop/releases/download/v{{ version }}/bit-pop-x86_64-linux.tar.gz"
-  sha256: "PLACEHOLDER_SHA256"
+  sha256: "d9fe77d533287f5e001182c2125fa4e28f6267f2df562fd5fc60a5b0f1f0c400"
 
 about:
   home: "https://github.com/mladenpop-oss/bit-pop"

@@ -1,0 +1,14 @@
+{
+  "snps": {},
+  "statistics": {
+    "total_strains": 0,
+    "total_snps": 0,
+    "strains_with_snps": 0,
+    "strain_details": []
+  },
+  "parameters": {
+    "kmer_size": 25,
+    "max_parent_size_mb": 50,
+    "extraction_time_seconds": 1.65
+  }
+}

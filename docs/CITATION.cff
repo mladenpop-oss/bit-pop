@@ -28,7 +28,7 @@ keywords:
 programming-language: Rust
 artwork: ""
 date-released: "2026-05-05"
-doi: "10.5281/zenodo.20043594"
+doi: "10.5281/zenodo.20043593"
 url: "https://github.com/mladenpop-oss/bit-pop"
 abstract: |
   We present Bit-Pop, a proof-of-concept genomic tool for simultaneous multi-genome

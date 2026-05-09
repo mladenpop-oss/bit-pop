@@ -555,6 +555,154 @@ impl FmIndex {
         }
     }
 
+    /// Backward search with fuzzy spaced seed support.
+    /// Allows up to `max_mismatches` mismatches in the "match" (true) positions of the mask.
+    /// Returns the SA range with the most matches (smallest range).
+    pub fn backward_search_spaced_fuzzy(
+        &self,
+        kmer: &[u8],
+        mask: &[bool],
+        max_mismatches: usize,
+    ) -> Option<(usize, usize)> {
+        if kmer.len() != mask.len() {
+            return None;
+        }
+
+        let match_positions: Vec<usize> = (0..mask.len())
+            .filter(|&i| mask[i])
+            .collect();
+
+        if match_positions.is_empty() {
+            return Some((0, self.bwt.len()));
+        }
+
+        if max_mismatches == 0 {
+            return self.backward_search_spaced(kmer, mask);
+        }
+
+        let mut best_range: Option<(usize, usize)> = None;
+
+        Self::search_fuzzy_recursive(
+            self,
+            kmer,
+            mask,
+            &match_positions,
+            0,
+            0,
+            max_mismatches,
+            &mut best_range,
+        );
+
+        best_range
+    }
+
+    fn search_fuzzy_recursive(
+        &self,
+        kmer: &[u8],
+        mask: &[bool],
+        match_positions: &[usize],
+        match_idx: usize,
+        mismatches: usize,
+        max_mismatches: usize,
+        best_range: &mut Option<(usize, usize)>,
+    ) {
+        if mismatches > max_mismatches {
+            return;
+        }
+
+        if match_idx == match_positions.len() {
+            if let Some((lower, upper)) = self.backward_search_spaced(kmer, mask) {
+                if let Some((best_lower, best_upper)) = best_range {
+                    let current_size = upper - lower;
+                    let best_size = *best_upper - *best_lower;
+                    if current_size < best_size {
+                        *best_range = Some((lower, upper));
+                    }
+                } else {
+                    *best_range = Some((lower, upper));
+                }
+            }
+            return;
+        }
+
+        let pos = match_positions[match_idx];
+        let original_base = kmer[pos];
+
+        // Try original base (no mismatch)
+        self.search_fuzzy_recursive(
+            kmer,
+            mask,
+            match_positions,
+            match_idx + 1,
+            mismatches,
+            max_mismatches,
+            best_range,
+        );
+
+        // Try alternative bases (mismatch)
+        if mismatches < max_mismatches {
+            for alt in 1..=4u8 {
+                if alt != original_base {
+                    let mut modified_kmer = kmer.to_vec();
+                    modified_kmer[pos] = alt;
+                    self.search_fuzzy_recursive(
+                        &modified_kmer,
+                        mask,
+                        match_positions,
+                        match_idx + 1,
+                        mismatches + 1,
+                        max_mismatches,
+                        best_range,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Find all positions where fuzzy spaced pattern occurs.
+    /// Allows up to `max_mismatches` mismatches in the "match" positions.
+    pub fn find_positions_spaced_fuzzy(
+        &self,
+        kmer: &[u8],
+        mask: &[bool],
+        max_mismatches: usize,
+        max_positions: usize,
+    ) -> Vec<(u32, u64)> {
+        let (lower, upper) = match self.backward_search_spaced_fuzzy(kmer, mask, max_mismatches) {
+            Some(r) => r,
+            None => return Vec::new(),
+        };
+
+        let mut positions = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        for rank in lower..upper {
+            if positions.len() >= max_positions {
+                break;
+            }
+            let sa_pos = self.sa[rank];
+            let (genome_id, genome_pos) = self.sa_to_genome_pos(sa_pos);
+            if seen.insert((genome_id, genome_pos)) {
+                positions.push((genome_id, genome_pos as u64));
+            }
+        }
+
+        positions
+    }
+
+    /// Count occurrences of a fuzzy spaced pattern.
+    pub fn count_occurrences_spaced_fuzzy(
+        &self,
+        kmer: &[u8],
+        mask: &[bool],
+        max_mismatches: usize,
+    ) -> usize {
+        match self.backward_search_spaced_fuzzy(kmer, mask, max_mismatches) {
+            Some((lower, upper)) => upper - lower,
+            None => 0,
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.bwt.len()
     }

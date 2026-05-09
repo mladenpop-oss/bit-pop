@@ -6,7 +6,19 @@ use std::time::Instant;
 use bit_pop::cache::CacheManager;
 use bit_pop::fastq::{parse_reads, ReadsFormat};
 use bit_pop::ncbi::{NcbiClient, NcbiConfig};
-use bit_pop::{AlignMode, BitPop};
+use bit_pop::{AlignMode, BitPop, FuzzyMethod};
+
+fn extract_cami_genome_name(basename: &str) -> String {
+    if basename.starts_with("evo_") {
+        basename.to_string()
+    } else if basename.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+        let without_run = basename.split("_run").next().unwrap_or(basename);
+        let parts: Vec<&str> = without_run.splitn(2, '.').collect();
+        parts[0].to_string()
+    } else {
+        basename.to_string()
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "bit-pop", about = "Multi-genome DNA read mapper", long_about = None)]
@@ -80,6 +92,14 @@ struct RunArgs {
     #[arg(short = 's', long)]
     spaced_seed: bool,
 
+    /// Fuzzy k-mer matching method: none, fuzzy-kmer, fuzzy-seed, neighborhood
+    #[arg(long, default_value = "none")]
+    method: String,
+
+    /// Maximum number of mismatches for fuzzy matching (default: 1)
+    #[arg(long, default_value = "1")]
+    fuzzy_mismatches: usize,
+
     /// Read type: short (Illumina, k=10) or long (Nanopore/PacBio, auto k)
     #[arg(long, default_value = "short")]
     read_type: String,
@@ -144,6 +164,14 @@ struct BuildArgs {
     #[arg(long, default_value = "short")]
     read_type: String,
 
+    /// Fuzzy k-mer matching method: none, fuzzy-kmer, fuzzy-seed, neighborhood
+    #[arg(long, default_value = "none")]
+    method: String,
+
+    /// Maximum number of mismatches for fuzzy matching (default: 1)
+    #[arg(long, default_value = "1")]
+    fuzzy_mismatches: usize,
+
     /// Number of threads
     #[arg(short, long, default_value = "1")]
     threads: usize,
@@ -152,6 +180,10 @@ struct BuildArgs {
     #[cfg(feature = "mmap")]
     #[arg(long)]
     mmap: bool,
+
+    /// Use CAMI mode: extract genome name from filename (e.g., 1036554.gt1kb.fasta -> 1036554)
+    #[arg(long)]
+    cami: bool,
 }
 
 #[derive(clap::Args)]
@@ -195,6 +227,14 @@ struct MapArgs {
     /// Number of top rarest k-mers to try as anchors (default: 1)
     #[arg(long, default_value = "1")]
     top_n: usize,
+
+    /// Fuzzy k-mer matching method: none, fuzzy-kmer, fuzzy-seed, neighborhood
+    #[arg(long, default_value = "none")]
+    method: String,
+
+    /// Maximum number of mismatches for fuzzy matching (default: 1)
+    #[arg(long, default_value = "1")]
+    fuzzy_mismatches: usize,
 }
 
 #[derive(clap::Args)]
@@ -359,6 +399,20 @@ fn cmd_build(args: &BuildArgs, verbose: bool) {
     let mut bp = BitPop::new(args.k);
     bp.set_auto_k(args.auto_k);
     bp.set_read_type(&args.read_type);
+
+    if args.method != "none" {
+        let fuzzy_method = match args.method.as_str() {
+            "fuzzy-kmer" => FuzzyMethod::FuzzyKmer,
+            "fuzzy-seed" => FuzzyMethod::FuzzySeed,
+            "neighborhood" => FuzzyMethod::Neighborhood,
+            _ => FuzzyMethod::None,
+        };
+        bp.set_fuzzy_method(fuzzy_method);
+        bp.set_fuzzy_mismatches(args.fuzzy_mismatches);
+        if verbose {
+            println!("  Fuzzy method: {} (mismatches: {})", args.method, args.fuzzy_mismatches);
+        }
+    }
     let mut total_bases: usize = 0;
 
     let pb = ProgressBar::new(args.fasta.len() as u64);
@@ -372,31 +426,51 @@ fn cmd_build(args: &BuildArgs, verbose: bool) {
         let path_str = fasta_path.to_string_lossy().to_string();
         pb.set_message(format!("Loading: {}", path_str));
 
-        #[cfg(feature = "mmap")]
-        let ids = if args.mmap {
-            bp.load_genome_fasta_mmap(&path_str)
-        } else {
-            bp.load_genome_fasta(&path_str)
-        };
-        #[cfg(not(feature = "mmap"))]
-        let ids = bp.load_genome_fasta(&path_str);
+        let gids = if args.cami {
+            let basename = fasta_path.file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let cami_name = extract_cami_genome_name(&basename);
+            
+            if verbose {
+                println!("  CAMI mode: {} -> {}", path_str, cami_name);
+            }
 
-        match ids {
-            Ok(gids) => {
-                for gid in gids {
-                    let seq_len = bp.genome_seq_len(gid).unwrap_or(0);
-                    total_bases += seq_len;
-                    if verbose {
-                        if let Some(name) = bp.genome_name(gid) {
-                            println!("    Added genome: {} ({} bases)", name, seq_len);
-                        }
+            let seqs = bit_pop::fasta::read_all_sequences(&path_str);
+            match seqs {
+                Ok(sequences) => {
+                    let mut ids = Vec::new();
+                    for (_header, seq) in sequences {
+                        let gid = bp.add_genome(&cami_name, &seq);
+                        ids.push(gid);
                     }
+                    ids
+                }
+                Err(e) => {
+                    pb.finish_with_message(format!("Error reading {}: {}", path_str, e));
+                    eprintln!("Error reading {}: {}", path_str, e);
+                    std::process::exit(1);
                 }
             }
-            Err(e) => {
-                pb.finish_with_message(format!("Error loading {}: {}", path_str, e));
-                eprintln!("Error loading {}: {}", path_str, e);
-                std::process::exit(1);
+        } else {
+            #[cfg(feature = "mmap")]
+            let ids = if args.mmap {
+                bp.load_genome_fasta_mmap(&path_str)
+            } else {
+                bp.load_genome_fasta(&path_str)
+            };
+            #[cfg(not(feature = "mmap"))]
+            let ids = bp.load_genome_fasta(&path_str);
+            ids.unwrap_or_default()
+        };
+
+        for gid in gids {
+            let seq_len = bp.genome_seq_len(gid).unwrap_or(0);
+            total_bases += seq_len;
+            if verbose {
+                if let Some(name) = bp.genome_name(gid) {
+                    println!("    Added genome: {} ({} bases)", name, seq_len);
+                }
             }
         }
         pb.inc(1);
@@ -458,6 +532,20 @@ fn cmd_map(args: &MapArgs, verbose: bool) {
 
     if args.top_n > 1 {
         bp.set_top_n(args.top_n);
+    }
+
+    if args.method != "none" {
+        let fuzzy_method = match args.method.as_str() {
+            "fuzzy-kmer" => FuzzyMethod::FuzzyKmer,
+            "fuzzy-seed" => FuzzyMethod::FuzzySeed,
+            "neighborhood" => FuzzyMethod::Neighborhood,
+            _ => FuzzyMethod::None,
+        };
+        bp.set_fuzzy_method(fuzzy_method);
+        bp.set_fuzzy_mismatches(args.fuzzy_mismatches);
+        if verbose {
+            println!("  Fuzzy method: {} (mismatches: {})", args.method, args.fuzzy_mismatches);
+        }
     }
 
     let load_time = load_start.elapsed();
@@ -1535,6 +1623,18 @@ async fn cmd_run(args: &RunArgs) -> Result<(), String> {
     if args.spaced_seed {
         println!("  Spaced seed: enabled (pattern: 11101001110111)");
         bp.set_spaced_seed(true);
+    }
+
+    if args.method != "none" {
+        let fuzzy_method = match args.method.as_str() {
+            "fuzzy-kmer" => FuzzyMethod::FuzzyKmer,
+            "fuzzy-seed" => FuzzyMethod::FuzzySeed,
+            "neighborhood" => FuzzyMethod::Neighborhood,
+            _ => FuzzyMethod::None,
+        };
+        bp.set_fuzzy_method(fuzzy_method);
+        bp.set_fuzzy_mismatches(args.fuzzy_mismatches);
+        println!("  Fuzzy method: {} (mismatches: {})", args.method, args.fuzzy_mismatches);
     }
 
     if args.top_n > 1 {

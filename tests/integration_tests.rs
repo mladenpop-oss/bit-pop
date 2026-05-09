@@ -58,7 +58,6 @@ fn test_map_reads_to_sam() {
 
     // Map may return 0 if read doesn't match genome (repetitive k-mers filtered)
     assert!(sam_path.exists());
-    assert!(sam_path.exists());
 
     let content = fs::read_to_string(&sam_path).unwrap();
     assert!(content.starts_with("@SQ"));

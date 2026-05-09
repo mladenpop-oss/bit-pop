@@ -1,3 +1,4 @@
+use std::env;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -20,8 +21,15 @@ impl SimpleRng {
 }
 
 fn main() {
-    let fasta_path = Path::new(r"C:\Users\Daddy\Downloads\source_genomes\test_subset\combined.fna");
-    let fastq_out = Path::new(r"C:\Users\Daddy\Downloads\test_reads.fq");
+    let args: Vec<String> = env::args().collect();
+    if args.len() < 3 {
+        eprintln!("Usage: {} <fasta_path> <fastq_output> [num_reads_per_genome]", args[0]);
+        std::process::exit(1);
+    }
+
+    let fasta_path = Path::new(&args[1]);
+    let fastq_out = Path::new(&args[2]);
+    let num_reads_per_genome: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
     
     let file = File::open(fasta_path).expect("Cannot open FASTA");
     let reader = BufReader::new(file);
@@ -60,7 +68,11 @@ fn main() {
     for (i, seq) in sequences.iter().enumerate() {
         if seq.len() < 100 { continue; }
         
-        let num_reads = 3 + (rng.next_range(3));
+        let num_reads = if num_reads_per_genome > 0 {
+            num_reads_per_genome
+        } else {
+            3 + (rng.next_range(3) as usize)
+        };
         for _ in 0..num_reads {
             if seq.len() < 75 { continue; }
             let max_start = seq.len() - 75 + 1;

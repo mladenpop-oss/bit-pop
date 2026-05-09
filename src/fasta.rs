@@ -4,6 +4,20 @@ use std::io::{self, BufRead, BufReader};
 #[cfg(feature = "mmap")]
 use memmap2::Mmap;
 
+/// Read all sequences from a FASTA file.
+/// Returns a Vec of (header, sequence) pairs.
+pub fn read_all_sequences(path: &str) -> io::Result<Vec<(String, String)>> {
+    let mut reader = FastaReader::new(path)?;
+    let mut sequences = Vec::new();
+    while let Some(result) = reader.next() {
+        match result {
+            Ok((header, sequence)) => sequences.push((header, sequence)),
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(sequences)
+}
+
 /// Reads FASTA files and yields (header, sequence) pairs.
 /// Streaming: does not load entire file into memory at once.
 pub struct FastaReader {

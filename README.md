@@ -3,7 +3,7 @@
 [![CI](https://github.com/mladenpop-oss/bit-pop/actions/workflows/ci.yml/badge.svg)](https://github.com/mladenpop-oss/bit-pop/actions/workflows/ci.yml)
 [![Tests](https://img.shields.io/badge/tests-253%2B%20unit%2C%205%20integration-blue)](https://github.com/mladenpop-oss/bit-pop)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20043594.svg)](https://doi.org/10.5281/zenodo.20043594)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20043593.svg)](https://doi.org/10.5281/zenodo.20043593)
 
 > **Ultra-fast multi-genome DNA read classification in under 1 second.** Maps 20k reads across 3 genomes at **99.3% accuracy** using a compact FM-index built in Rust with bit-level parallelism.
 
@@ -56,6 +56,30 @@ See [Usage](#usage) for full documentation.
 - **NCBI integration**: Download genomes directly from NCBI with `--ncbi` flag
 - **Progress reporting**: CLI progress bars for build and mapping operations
 - **Smart defaults**: Automatic output paths, index detection, and progress reporting
+- **Fuzzy k-mer matching**: Three methods for improved strain resolution (`--method` flag)
+
+## Fuzzy K-mer Methods
+
+Bit-Pop supports three fuzzy k-mer matching methods for improved resolution of highly similar genomes (e.g., bacterial strains with >99.9% identity):
+
+| Method | Flag | Description |
+|--------|------|-------------|
+| **None** (default) | `--method none` | Exact k-mer matching only |
+| **Fuzzy K-mer** | `--method fuzzy-kmer --fuzzy-mismatches N` | Generate all k-mer variants with N substitutions, query FM-index for each |
+| **Fuzzy Seed** | `--method fuzzy-seed --fuzzy-mismatches N` | Allow N mismatches in spaced seed "match" positions |
+| **Neighborhood** | `--method neighborhood --fuzzy-mismatches N` | Build hash table at index build time for O(1) fuzzy lookup |
+
+**Example:**
+```bash
+bit-pop run genome.fna reads.fastq --method fuzzy-kmer --fuzzy-mismatches 1
+```
+
+**Trade-offs:**
+- `fuzzy-kmer`: Best accuracy for strain resolution, ~30x slower (N=1)
+- `fuzzy-seed`: Good balance, works with spaced seeds, ~20x slower (N=1)
+- `neighborhood`: Fastest query time, but larger index file (~60x memory for N=1)
+
+
 
 ## Comparison with Existing Tools
 
@@ -236,6 +260,23 @@ cargo build --release
 | `--top-n` | Top N rarest k-mer anchors (higher = better mapping rate, slower) | 1 |
 | `--mmap` | Use memory-mapped FASTA loading | false |
 | `--force` | Force rebuild index | false |
+| `--method` | Fuzzy k-mer method: none, fuzzy-kmer, fuzzy-seed, neighborhood | none |
+| `--fuzzy-mismatches` | Max mismatches for fuzzy matching | 1 |
+
+### `build` Command — CAMI Dataset Support
+
+For CAMI benchmark datasets, use the `--cami` flag during index build to extract genome names from filenames instead of FASTA headers:
+
+```bash
+# CAMI dataset — genome names extracted from filenames
+bit-pop build --cami -f 1036554.gt1kb.fasta -o index.bitpop
+# → "1036554.gt1kb.fasta" → genome name: "1036554"
+
+# evo_* strains — .NNN suffix preserved
+# → "evo_1049056.011.fna" → genome name: "evo_1049056.011"
+```
+
+This fixes accuracy for CAMI datasets where FASTA headers don't match ground truth labels. Without `--cami`, accuracy can be as low as 1.07%; with it, accuracy reaches ~85.87% on the CAMI Low Complexity benchmark.
 
 ### Align Modes
 
@@ -276,25 +317,28 @@ cargo build --release
 
 ### CAMI Low Complexity Benchmark (62 Genomes)
 
-Benchmark on the CAMI I Low Complexity dataset — 50K reads across 62 microbial genomes including highly similar strains.
+Benchmark on the CAMI I Low Complexity dataset — 20K reads across 62 microbial genomes including highly similar strains.
 
-**Setup**: 62 genomes (1880 sequences, ~1.4 GB index), 50K reads (2x150bp Illumina), k=10, top_n=2, 8 threads
+**Setup**: 62 genomes (1880 sequences, ~1.4 GB index), 20K reads (2x150bp Illumina), k=10, top_n=2, 8 threads, `--cami` flag for genome naming
 
 | Metric | Value |
 |--------|-------|
-| Mapping rate | 90.0% (22,501/25,000 paired-end reads) |
-| Overall accuracy | 49.4% |
-| Time | 64.9s (~2.6s per 10k reads) |
+| Mapping rate | 92.02% (30,105/40,000 paired-end reads) |
+| Overall accuracy | 85.87% |
+| Time | ~7.9s per 10k reads |
 
 **Breakdown by genome type**:
 
 | Genome Type | Count | Accuracy |
 |-------------|-------|----------|
-| Numeric genomes (e.g. 1036554) | ~3,800 | ~100% |
-| Sample* genomes (single-contig) | ~200 | ~100% |
-| evo_* genomes (similar strains) | ~5,700 | ~51.8% |
+| Numeric genomes (e.g. 1036554) | ~8,000 | 85.49% |
+| other | ~8,000 | 88.27% |
+| Sample* genomes (single-contig) | ~2,000 | 91.33% |
+| evo_* genomes (similar strains) | ~4,162 | 54.20% |
 
-**Why is overall accuracy 49.4%?** The evo_* genomes are >99.9% identical strains from the same sample assembly. They share most k-mers with each other and with their parent numeric genomes, causing reads to map to the wrong strain. This is a fundamental limitation of k-mer-based classification for near-identical genomes, not a bug.
+**Paired-end conflicts**: 35.5% of read pairs have R1 and R2 mapping to different genomes, reducing effective accuracy.
+
+**Why is overall accuracy lower than single-genome benchmarks?** The evo_* genomes are >99.9% identical strains from the same sample assembly. They share most k-mers with each other, causing reads to map to the wrong strain. This is a fundamental limitation of k-mer-based classification for near-identical genomes, not a bug. SNP-aware weighting or ML would be required for strain-level resolution.
 
 **See**: [docs/paper.pdf](docs/paper.pdf) for detailed analysis.
 
@@ -420,7 +464,7 @@ python scripts/bitpop-workflow.py merge mapped/ -o final.sam
 - **Phase 7**: Large genome workaround (`bitpop-workflow.py`)
 - **UX**: `run` command with auto-index caching and smart defaults
 - **Tests**: Integration test suite (5 tests)
-- **Phase 4**: CAMI Low Complexity benchmark (62 genomes, 50K reads, 90% mapping rate)
+- **Phase 4**: CAMI Low Complexity benchmark (62 genomes, 20K reads, 92.02% mapping rate, 85.87% accuracy)
 
 ### 🔧 In Progress
 - **Phase 1.3 (extended)**: K-mer voting for ultra-long reads (>10kb)
@@ -434,7 +478,7 @@ python scripts/bitpop-workflow.py merge mapped/ -o final.sam
 ### 📊 Expand Benchmarks
 - 100+ genomes and eukaryotic genomes
 - Direct comparison with Bowtie2, BWA-MEM on multi-genome tasks
-- CAMI Low Complexity: completed (62 genomes, 50K reads)
+- CAMI Low Complexity: completed (62 genomes, 20K reads, 85.87% accuracy)
 
 ## Getting Help
 
@@ -458,14 +502,14 @@ Source code available under the MIT License.
   author = {Popovi{\'c}, Mladen},
   title = {Bit-Pop: A Proof-of-Concept Tool for Multi-Genome DNA Read Classification},
   year = {2026},
-  doi = {10.5281/zenodo.20043594},
+  doi = {10.5281/zenodo.20043593},
   url = {https://github.com/mladenpop-oss/bit-pop}
 }
 ```
 
 Or plain text:
 
-> Popović, M. (2026). Bit-Pop: A Proof-of-Concept Tool for Multi-Genome DNA Read Classification. https://doi.org/10.5281/zenodo.20043594
+> Popović, M. (2026). Bit-Pop: A Proof-of-Concept Tool for Multi-Genome DNA Read Classification. https://doi.org/10.5281/zenodo.20043593
 
 ## License
 
