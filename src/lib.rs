@@ -1409,9 +1409,7 @@ impl BitPop {
             let kmer_encoded = Self::encode_kmer_bytes_0indexed(self, kmer_bytes);
 
             let variants = generate_kmer_variants(kmer_encoded, self.k, self.fuzzy_mismatches);
-            let all_variants: Vec<u64> = std::iter::once(kmer_encoded)
-                .chain(variants)
-                .collect();
+            let all_variants: Vec<u64> = std::iter::once(kmer_encoded).chain(variants).collect();
 
             let mut total_count = 0usize;
             let mut found_any = false;
@@ -1496,9 +1494,8 @@ impl BitPop {
                 let kmer_encoded = Self::encode_kmer_bytes(self, kmer_bytes);
 
                 let variants = generate_kmer_variants(kmer_encoded, self.k, self.fuzzy_mismatches);
-                let all_variants: Vec<u64> = std::iter::once(kmer_encoded)
-                    .chain(variants)
-                    .collect();
+                let all_variants: Vec<u64> =
+                    std::iter::once(kmer_encoded).chain(variants).collect();
 
                 for variant in all_variants {
                     let entry = (variant, genome_id, i as u64);
@@ -1532,9 +1529,7 @@ impl BitPop {
             let kmer_encoded = Self::encode_kmer_bytes(self, kmer_bytes);
 
             let variants = generate_kmer_variants(kmer_encoded, self.k, self.fuzzy_mismatches);
-            let all_variants: Vec<u64> = std::iter::once(kmer_encoded)
-                .chain(variants)
-                .collect();
+            let all_variants: Vec<u64> = std::iter::once(kmer_encoded).chain(variants).collect();
 
             for variant in all_variants {
                 if let Some(entries) = hash_table.get(&variant) {
@@ -1550,11 +1545,10 @@ impl BitPop {
         for (i, kmer_bytes) in encoded.windows(self.k).enumerate() {
             let kmer_encoded = Self::encode_kmer_bytes(self, kmer_bytes);
             let variants = generate_kmer_variants(kmer_encoded, self.k, self.fuzzy_mismatches);
-            let all_variants: Vec<u64> = std::iter::once(kmer_encoded)
-                .chain(variants)
-                .collect();
+            let all_variants: Vec<u64> = std::iter::once(kmer_encoded).chain(variants).collect();
 
-            let mut total_positions: std::collections::HashSet<u64> = std::collections::HashSet::new();
+            let mut total_positions: std::collections::HashSet<u64> =
+                std::collections::HashSet::new();
             for variant in all_variants {
                 if let Some(entries) = hash_table.get(&variant) {
                     for &(_, _, pos) in entries {
@@ -1576,7 +1570,7 @@ impl BitPop {
         candidates
     }
 
-   /// Encode bytes (1-indexed A=1,C=2,G=3,T=4) into u64 (0-indexed internally).
+    /// Encode bytes (1-indexed A=1,C=2,G=3,T=4) into u64 (0-indexed internally).
     fn encode_kmer_bytes_0indexed(&self, bytes: &[u8]) -> u64 {
         let mut result: u64 = 0;
         for &b in bytes {
@@ -1658,9 +1652,7 @@ impl BitPop {
         }
 
         let top_n_kmers = match self.fuzzy_method {
-            FuzzyMethod::FuzzyKmer => {
-                self.find_top_n_rarest_kmers_fuzzy(&encoded, fm, max_hits)
-            }
+            FuzzyMethod::FuzzyKmer => self.find_top_n_rarest_kmers_fuzzy(&encoded, fm, max_hits),
             FuzzyMethod::FuzzySeed => {
                 if self.use_spaced_seed {
                     self.find_top_n_rarest_kmers_spaced_fuzzy(&encoded, fm, max_hits)
@@ -1840,9 +1832,7 @@ impl BitPop {
         }
 
         let top_n_kmers = match self.fuzzy_method {
-            FuzzyMethod::FuzzyKmer => {
-                self.find_top_n_rarest_kmers_fuzzy(&encoded, fm, max_hits)
-            }
+            FuzzyMethod::FuzzyKmer => self.find_top_n_rarest_kmers_fuzzy(&encoded, fm, max_hits),
             FuzzyMethod::FuzzySeed => {
                 if self.use_spaced_seed {
                     self.find_top_n_rarest_kmers_spaced_fuzzy(&encoded, fm, max_hits)
@@ -1853,9 +1843,7 @@ impl BitPop {
             FuzzyMethod::Neighborhood => {
                 self.find_top_n_rarest_kmers_neighborhood(&encoded, fm, max_hits)
             }
-            FuzzyMethod::None => {
-                self.find_top_n_rarest_kmers(&encoded, fm, max_hits)
-            }
+            FuzzyMethod::None => self.find_top_n_rarest_kmers(&encoded, fm, max_hits),
         };
         if top_n_kmers.is_empty() {
             return Vec::new();
@@ -4438,8 +4426,11 @@ mod tests {
         let kmer = encode_kmer("ACGT").unwrap();
         let variants = generate_kmer_variants(kmer, 4, 1);
         assert!(variants.len() > 0, "should generate variants");
-        assert!(!variants.contains(&kmer), "variants should not contain original");
-        
+        assert!(
+            !variants.contains(&kmer),
+            "variants should not contain original"
+        );
+
         // Verify one variant has exactly 1 mismatch
         let variant = variants[0];
         let original_decoded = decode_kmer(kmer, 4);
@@ -4460,7 +4451,7 @@ mod tests {
         bp.build();
 
         let fm = bp.fm_index.as_ref().unwrap();
-        
+
         // Original k-mer should be found
         let kmer_bytes = BitPop::kmer_encoded_to_bytes(encode_kmer("ACGT").unwrap(), 4);
         let count = fm.count_occurrences(&kmer_bytes);
@@ -4500,7 +4491,7 @@ mod tests {
         assert_eq!(bp.fuzzy_mismatches, 2);
     }
 
-     #[test]
+    #[test]
     fn test_anchor_filter_fuzzy_kmer() {
         let mut bp = BitPop::new(6);
         bp.add_genome("test", "AACCGGTACGTACGTAACCGGTTTC");
@@ -4513,13 +4504,22 @@ mod tests {
         let fm = bp.fm_index.as_ref().unwrap();
         let encoded = encode_sequence("ACGTAC");
         let regular_candidates = bp.find_top_n_rarest_kmers(&encoded, fm, usize::MAX);
-        assert!(!regular_candidates.is_empty(), "regular kmer filter should find candidates");
+        assert!(
+            !regular_candidates.is_empty(),
+            "regular kmer filter should find candidates"
+        );
 
         let fuzzy_candidates = bp.find_top_n_rarest_kmers_fuzzy(&encoded, fm, usize::MAX);
-        assert!(!fuzzy_candidates.is_empty(), "fuzzy kmer filter should find candidates");
-        
+        assert!(
+            !fuzzy_candidates.is_empty(),
+            "fuzzy kmer filter should find candidates"
+        );
+
         let scored = bp.anchor_filter("ACGTAC", 0.5);
-        assert!(!scored.is_empty(), "Fuzzy anchor_filter should find matches");
+        assert!(
+            !scored.is_empty(),
+            "Fuzzy anchor_filter should find matches"
+        );
     }
 
     #[test]
@@ -4559,6 +4559,9 @@ mod tests {
         bp.build();
 
         let scored = bp.anchor_filter("ACGTAC", 0.5);
-        assert!(!scored.is_empty(), "Neighborhood anchor_filter should find matches");
+        assert!(
+            !scored.is_empty(),
+            "Neighborhood anchor_filter should find matches"
+        );
     }
 }

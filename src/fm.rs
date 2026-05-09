@@ -568,9 +568,7 @@ impl FmIndex {
             return None;
         }
 
-        let match_positions: Vec<usize> = (0..mask.len())
-            .filter(|&i| mask[i])
-            .collect();
+        let match_positions: Vec<usize> = (0..mask.len()).filter(|&i| mask[i]).collect();
 
         if match_positions.is_empty() {
             return Some((0, self.bwt.len()));

@@ -11,7 +11,12 @@ use bit_pop::{AlignMode, BitPop, FuzzyMethod};
 fn extract_cami_genome_name(basename: &str) -> String {
     if basename.starts_with("evo_") {
         basename.to_string()
-    } else if basename.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+    } else if basename
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_digit())
+        .unwrap_or(false)
+    {
         let without_run = basename.split("_run").next().unwrap_or(basename);
         let parts: Vec<&str> = without_run.splitn(2, '.').collect();
         parts[0].to_string()
@@ -410,7 +415,10 @@ fn cmd_build(args: &BuildArgs, verbose: bool) {
         bp.set_fuzzy_method(fuzzy_method);
         bp.set_fuzzy_mismatches(args.fuzzy_mismatches);
         if verbose {
-            println!("  Fuzzy method: {} (mismatches: {})", args.method, args.fuzzy_mismatches);
+            println!(
+                "  Fuzzy method: {} (mismatches: {})",
+                args.method, args.fuzzy_mismatches
+            );
         }
     }
     let mut total_bases: usize = 0;
@@ -427,11 +435,12 @@ fn cmd_build(args: &BuildArgs, verbose: bool) {
         pb.set_message(format!("Loading: {}", path_str));
 
         let gids = if args.cami {
-            let basename = fasta_path.file_stem()
+            let basename = fasta_path
+                .file_stem()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_default();
             let cami_name = extract_cami_genome_name(&basename);
-            
+
             if verbose {
                 println!("  CAMI mode: {} -> {}", path_str, cami_name);
             }
@@ -544,7 +553,10 @@ fn cmd_map(args: &MapArgs, verbose: bool) {
         bp.set_fuzzy_method(fuzzy_method);
         bp.set_fuzzy_mismatches(args.fuzzy_mismatches);
         if verbose {
-            println!("  Fuzzy method: {} (mismatches: {})", args.method, args.fuzzy_mismatches);
+            println!(
+                "  Fuzzy method: {} (mismatches: {})",
+                args.method, args.fuzzy_mismatches
+            );
         }
     }
 
@@ -1634,7 +1646,10 @@ async fn cmd_run(args: &RunArgs) -> Result<(), String> {
         };
         bp.set_fuzzy_method(fuzzy_method);
         bp.set_fuzzy_mismatches(args.fuzzy_mismatches);
-        println!("  Fuzzy method: {} (mismatches: {})", args.method, args.fuzzy_mismatches);
+        println!(
+            "  Fuzzy method: {} (mismatches: {})",
+            args.method, args.fuzzy_mismatches
+        );
     }
 
     if args.top_n > 1 {
