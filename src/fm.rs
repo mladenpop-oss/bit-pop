@@ -594,6 +594,7 @@ impl FmIndex {
         best_range
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn search_fuzzy_recursive(
         &self,
         kmer: &[u8],
