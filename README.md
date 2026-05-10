@@ -57,7 +57,7 @@ See [Usage](#usage) for full documentation.
 - **Progress reporting**: CLI progress bars for build and mapping operations
 - **Smart defaults**: Automatic output paths, index detection, and progress reporting
 - **Fuzzy k-mer matching**: Three methods for improved strain resolution (`--method` flag)
-- **EM post-processing**: Expectation-Maximization algorithm for multi-candidate refinement (`bit-pop em` command), +5.14pp evo_*, +4.49pp overall
+- **EM post-processing**: Expectation-Maximization algorithm for multi-candidate refinement (`bit-pop em` command), +1.4pp evo_*, +4.49pp overall
 
 ## Fuzzy K-mer Methods
 
