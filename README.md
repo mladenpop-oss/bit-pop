@@ -1,7 +1,7 @@
 # Bit-Pop: Multi-Genome DNA Read Classification
 
 [![CI](https://github.com/mladenpop-oss/bit-pop/actions/workflows/ci.yml/badge.svg)](https://github.com/mladenpop-oss/bit-pop/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-253%2B%20unit%2C%205%20integration-blue)](https://github.com/mladenpop-oss/bit-pop)
+[![Tests](https://img.shields.io/badge/tests-263%2B%20unit%2C%205%20integration-blue)](https://github.com/mladenpop-oss/bit-pop)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20043593.svg)](https://doi.org/10.5281/zenodo.20043593)
 
@@ -57,6 +57,7 @@ See [Usage](#usage) for full documentation.
 - **Progress reporting**: CLI progress bars for build and mapping operations
 - **Smart defaults**: Automatic output paths, index detection, and progress reporting
 - **Fuzzy k-mer matching**: Three methods for improved strain resolution (`--method` flag)
+- **EM post-processing**: Expectation-Maximization algorithm for multi-candidate refinement (`bit-pop em` command), +5.14pp evo_*, +4.49pp overall
 
 ## Fuzzy K-mer Methods
 
@@ -239,6 +240,29 @@ cargo build --release
 ./target/release/bit-pop update
 ```
 
+#### EM Post-Processing
+
+Apply Expectation-Maximization algorithm to improve multi-candidate SAM mappings:
+
+```bash
+# Run EM on a SAM file produced by `bit-pop map`
+./target/release/bit-pop em \
+  -i mapped.sam \
+  -o em_mapped.sam \
+  --convergence 0.001 \
+  --max-iterations 20 \
+  --temperature 0.1 \
+  --top-k 30
+```
+
+**What it does**: When a read maps to multiple genomes with similar scores, EM uses population-level abundance signals to reassign reads to the most likely genome. Typically converges in 9-11 iterations (~0.13s on 18K reads).
+
+**Parameters**:
+- `--convergence`: KL divergence threshold for stopping (default: 0.001)
+- `--max-iterations`: Maximum EM iterations (default: 20)
+- `--temperature`: Softmax temperature for probability smoothing (default: 0.1)
+- `--top-k`: Number of top candidates per read (default: 30)
+
 ### `run` Command Options
 
 | Flag | Description | Default |
@@ -336,6 +360,15 @@ Benchmark on the CAMI I Low Complexity dataset — 20K reads across 62 microbial
 | Sample* genomes (single-contig) | ~2,000 | 91.33% |
 | evo_* genomes (similar strains) | ~4,162 | 54.20% |
 
+**With EM post-processing** (Rust EM v2, temperature=0.1, top-k=30):
+
+| Metric | Baseline | + EM | Delta |
+|--------|----------|------|-------|
+| Overall accuracy | 76.38% | **80.87%** | +4.49pp |
+| evo_* accuracy | 52.28% | **57.42%** | +5.14pp |
+| numeric | 82.65% | 86.36% | +3.71pp |
+| Sample* | 86.13% | 94.22% | +8.09pp |
+
 **Paired-end conflicts**: 35.5% of read pairs have R1 and R2 mapping to different genomes, reducing effective accuracy.
 
 **Why is overall accuracy lower than single-genome benchmarks?** The evo_* genomes are >99.9% identical strains from the same sample assembly. They share most k-mers with each other, causing reads to map to the wrong strain. This is a fundamental limitation of k-mer-based classification for near-identical genomes, not a bug. SNP-aware weighting or ML would be required for strain-level resolution.
@@ -345,12 +378,13 @@ Benchmark on the CAMI I Low Complexity dataset — 20K reads across 62 microbial
 ## Project Structure
 
 ```
-├── src/                    # Rust source code (14 modules)
-│   ├── main.rs             # CLI entry point (8 subcommands)
+├── src/                    # Rust source code (15 modules)
+│   ├── main.rs             # CLI entry point (9 subcommands)
 │   ├── lib.rs              # Core library (BitPop struct, DNA encoding)
 │   ├── fm.rs               # FM-index (SA-IS, BWT, backward search)
 │   ├── align.rs            # Alignment (XOR, SW, Myers)
 │   ├── sam.rs              # SAM output format
+│   ├── em.rs               # EM post-processing algorithm
 │   ├── fasta.rs            # FASTA parsing + memory-mapped reader
 │   ├── fastq.rs            # FASTQ parsing + quality filtering
 │   ├── rank.rs             # Multi-genome ranking
@@ -365,7 +399,8 @@ Benchmark on the CAMI I Low Complexity dataset — 20K reads across 62 microbial
 ├── scripts/
 │   ├── simulate_reads.py   # Read simulation (Biopython)
 │   ├── analyze_benchmark_new.ps1 # Benchmark analysis
-│   └── bitpop-workflow.py  # Multi-index workflow tool
+│   ├── bitpop-workflow.py  # Multi-index workflow tool
+│   └── em_classifier.py    # Python EM prototype (reference implementation)
 ├── data/
 │   ├── genomes/            # Reference genomes (.fna, .fasta)
 │   └── reads/              # Sequencing reads (.fastq)
@@ -405,7 +440,7 @@ cargo bench
 ```
 
 **Test coverage:**
-- 253+ unit tests (alignment, indexing, serialization, SAM output, spaced seeds, delta encoding, persistence)
+- 263+ unit tests (alignment, indexing, serialization, SAM output, spaced seeds, delta encoding, persistence, EM algorithm)
 - 5 integration tests (build, map, multi-genome, SAM format, cache reuse)
 - 17 Criterion benchmark groups (XOR, SW, Myers, FM-index, k-mer filter, full pipeline)
 
@@ -467,13 +502,14 @@ python scripts/bitpop-workflow.py merge mapped/ -o final.sam
 - **Phase 4**: CAMI Low Complexity benchmark (62 genomes, 20K reads, 92.02% mapping rate, 85.87% accuracy)
 
 ### 🔧 In Progress
-- **Phase 1.3 (extended)**: K-mer voting for ultra-long reads (>10kb)
+- **EM refinement**: Multi-k consensus (k=8 + k=10 + k=12) for improved strain resolution
 
 ### 📋 Planned
 - **Phase 2**: SA compression, streaming input, SIMD acceleration (AVX2)
 - **Phase 3**: CIGAR accuracy improvements, quality filter enhancements
 - **Phase 5**: Read caching, enhanced statistics, API documentation (docs.rs)
 - **Multi-index**: Unified FM-index with automatic splitting (>2GB genomes)
+- **Strain resolution**: Multi-k consensus, long-read support (PacBio/ONT), known SNP (VCF) integration
 
 ### 📊 Expand Benchmarks
 - 100+ genomes and eukaryotic genomes
