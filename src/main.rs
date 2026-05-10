@@ -2069,9 +2069,10 @@ fn cmd_em(args: &EmArgs) {
     let em_mappings: ReadMappings = read_genomes
         .iter()
         .flat_map(|(read_name, genomes)| {
-            genomes.iter().map(|(genome, score)| {
-                (read_name.clone(), genome.clone(), *score)
-            }).collect::<Vec<_>>()
+            genomes
+                .iter()
+                .map(|(genome, score)| (read_name.clone(), genome.clone(), *score))
+                .collect::<Vec<_>>()
         })
         .collect();
 

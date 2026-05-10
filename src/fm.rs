@@ -506,7 +506,7 @@ impl FmIndex {
             let sa_pos = self.sa[rank];
             let (genome_id, _) = self.sa_to_genome_pos(sa_pos);
             genomes.insert(genome_id);
-            
+
             // Stop early once we've seen 2+ genomes
             if genomes.len() >= 2 {
                 break;

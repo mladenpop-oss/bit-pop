@@ -121,7 +121,11 @@ impl EMClassifier {
 
         // Initialize soft assignments using softmax
         for (read_name, genome_scores) in read_map {
-            let probs = normalize_to_probabilities(&genome_scores, self.config.temperature, self.config.top_k);
+            let probs = normalize_to_probabilities(
+                &genome_scores,
+                self.config.temperature,
+                self.config.top_k,
+            );
             if !probs.is_empty() {
                 self.soft_assignments.push((read_name, probs));
             }
@@ -151,7 +155,12 @@ impl EMClassifier {
 
             // Check convergence
             if iteration > 1 {
-                kl_divergence = compute_kl_divergence(&prev_abundances, &self.abundances, &self.all_genomes, self.config.min_abundance);
+                kl_divergence = compute_kl_divergence(
+                    &prev_abundances,
+                    &self.abundances,
+                    &self.all_genomes,
+                    self.config.min_abundance,
+                );
             }
 
             prev_abundances = self.abundances.clone();
@@ -171,7 +180,11 @@ impl EMClassifier {
         EMStats {
             iterations: self.iterations_run,
             final_kl: self.final_kl,
-            active_genomes: self.abundances.values().filter(|&&a| a > self.config.min_abundance).count(),
+            active_genomes: self
+                .abundances
+                .values()
+                .filter(|&&a| a > self.config.min_abundance)
+                .count(),
         }
     }
 
@@ -186,7 +199,11 @@ impl EMClassifier {
             let weighted: HashMap<String, f64> = probs
                 .iter()
                 .map(|(genome, prob)| {
-                    let abundance = self.abundances.get(genome).copied().unwrap_or(self.config.min_abundance);
+                    let abundance = self
+                        .abundances
+                        .get(genome)
+                        .copied()
+                        .unwrap_or(self.config.min_abundance);
                     (genome.clone(), prob * abundance)
                 })
                 .collect();
@@ -249,7 +266,9 @@ impl EMClassifier {
         self.soft_assignments
             .iter()
             .map(|(read_name, probs)| {
-                let best = probs.iter().max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+                let best = probs
+                    .iter()
+                    .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
                 (read_name.clone(), best.map(|(g, _)| g.clone()))
             })
             .collect()
@@ -257,7 +276,11 @@ impl EMClassifier {
 
     /// Get sorted abundance report.
     pub fn get_abundance_report(&self) -> Vec<(String, f64)> {
-        let mut sorted: Vec<_> = self.abundances.iter().map(|(g, a)| (g.clone(), *a)).collect();
+        let mut sorted: Vec<_> = self
+            .abundances
+            .iter()
+            .map(|(g, a)| (g.clone(), *a))
+            .collect();
         sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         sorted
     }
@@ -296,7 +319,10 @@ fn normalize_to_probabilities(
     }
 
     // Softmax with temperature
-    let max_logit = top.iter().map(|&(_, s)| s).fold(f64::NEG_INFINITY, |a, b| f64::max(a, *b));
+    let max_logit = top
+        .iter()
+        .map(|&(_, s)| s)
+        .fold(f64::NEG_INFINITY, |a, b| f64::max(a, *b));
 
     let mut exps: HashMap<String, f64> = HashMap::new();
     let mut total = 0.0;
