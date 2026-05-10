@@ -110,6 +110,7 @@ Bit-Pop is like a local database — knows what you need, works offline, instant
 | Build time | 2 minutes | Hours to days |
 | Offline operation | ✅ Full | ❌ No |
 | Custom update | Seconds (add 1 genome) | Rebuild entire database |
+| Index growth | Grows only with your data, always clean | Fixed massive database with unused data |
 
 ### When to Use Bit-Pop
 
