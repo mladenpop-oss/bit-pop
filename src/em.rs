@@ -27,6 +27,8 @@ pub struct EMConfig {
     pub temperature: f64,
     /// Top-K genomes per read for EM.
     pub top_k: usize,
+    /// Minimum probability to apply EM reassignment (0.0 = always apply).
+    pub confidence_threshold: f64,
 }
 
 impl Default for EMConfig {
@@ -37,6 +39,7 @@ impl Default for EMConfig {
             min_abundance: 1e-6,
             temperature: 0.1,
             top_k: 10,
+            confidence_threshold: 0.0,
         }
     }
 }
@@ -269,7 +272,15 @@ impl EMClassifier {
                 let best = probs
                     .iter()
                     .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal));
-                (read_name.clone(), best.map(|(g, _)| g.clone()))
+                if let Some((genome, prob)) = best {
+                    if *prob >= self.config.confidence_threshold {
+                        (read_name.clone(), Some(genome.clone()))
+                    } else {
+                        (read_name.clone(), None)
+                    }
+                } else {
+                    (read_name.clone(), None)
+                }
             })
             .collect()
     }

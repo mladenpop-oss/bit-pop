@@ -398,6 +398,10 @@ struct EmArgs {
     /// Top-K genomes per read for EM
     #[arg(long, default_value = "10")]
     top_k: usize,
+
+    /// Minimum probability to apply EM reassignment (0.0 = always apply, 0.75 = only high confidence)
+    #[arg(long, default_value = "0.0")]
+    confidence_threshold: f64,
 }
 
 #[tokio::main]
@@ -2083,6 +2087,7 @@ fn cmd_em(args: &EmArgs) {
     println!("  Max iterations: {}", args.max_iterations);
     println!("  Temperature: {}", args.temperature);
     println!("  Top-K: {}", args.top_k);
+    println!("  Confidence threshold: {}", args.confidence_threshold);
     println!();
 
     let em_start = Instant::now();
@@ -2092,6 +2097,7 @@ fn cmd_em(args: &EmArgs) {
         max_iterations: args.max_iterations,
         temperature: args.temperature,
         top_k: args.top_k,
+        confidence_threshold: args.confidence_threshold,
         ..EMConfig::default()
     });
 
