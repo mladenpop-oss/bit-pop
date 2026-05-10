@@ -384,14 +384,14 @@ Benchmark on the CAMI I Low Complexity dataset — 20K reads across 62 microbial
 | Numeric genomes (e.g. 1036554) | ~8,000 | 85.49% |
 | other | ~8,000 | 88.27% |
 | Sample* genomes (single-contig) | ~2,000 | 91.33% |
-| evo_* genomes (similar strains) | ~4,162 | 54.20% |
+| evo_* genomes (similar strains) | ~16,202 | 58.4% |
 
 **With EM post-processing** (Rust EM v2, temperature=0.1, top-k=30, confidence=0.95):
 
 | Metric | Baseline | + EM | Delta |
 |--------|----------|------|-------|
 | Overall accuracy | 85.87% | ~86.5% | +0.6pp |
-| evo_* accuracy | 54.20% | **55.6%** | **+1.4pp** |
+| evo_* accuracy | 58.4% | **59.8%** | **+1.4pp** |
 
 **EM limitation on near-identical strains**: Detailed analysis of evo_* reads shows EM improves classification by +1.4pp on near-identical strains (>99.9% ANI). EM fixes 805 wrong predictions but breaks 755 correct ones (net +50). This confirms the limitation is **fundamentally information-theoretic, not algorithmic** — abundance signal is insufficient to disambiguate sibling strains that share >99.9% of their k-mers. The `--confidence-threshold 0.95` parameter prevents EM from breaking high-confidence correct predictions.
 
