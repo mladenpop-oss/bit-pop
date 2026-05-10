@@ -2147,17 +2147,15 @@ fn cmd_em(args: &EmArgs) {
         total += 1;
 
         // Check if this read has an EM assignment
-        if let Some(em_genome_opt) = hard_map.get(&qname) {
-            if let Some(em_genome) = em_genome_opt {
-                if is_primary && current_rname != em_genome.as_str() {
-                    parts[2] = em_genome.as_str();
-                    parts[4] = "40";
+        if let Some(Some(em_genome)) = hard_map.get(&qname) {
+            if is_primary && current_rname != em_genome.as_str() {
+                parts[2] = em_genome.as_str();
+                parts[4] = "40";
 
-                    let new_line = parts.join("\t");
-                    writeln!(out_file, "{}", new_line).unwrap();
-                    changed += 1;
-                    continue;
-                }
+                let new_line = parts.join("\t");
+                writeln!(out_file, "{}", new_line).unwrap();
+                changed += 1;
+                continue;
             }
         }
 
