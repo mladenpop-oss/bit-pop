@@ -30,7 +30,7 @@
 \maketitle
 
 \begin{abstract}
-We present Bit-Pop, a high-performance tool for multi-genome DNA read classification that identifies which genome in a collection best matches each sequencing read. While existing aligners such as Bowtie2, BWA-MEM, and minimap2 map reads to single reference genomes, Bit-Pop addresses the complementary problem of simultaneous classification across collections of $N$ genomes. The pipeline combines four key stages: (1) an FM-index built via the SA-IS algorithm (libsais) for efficient k-mer lookup; (2) a top-$N$ rarest k-mer anchor filter with quality-aware filtering and reverse complement support; (3) a 2-bit XOR alignment achieving approximately 2.3 ns per 31-base chunk, with Myers edit distance as a fast alternative to Smith--Waterman (23--54$\times$ faster); and (4) a combined ranking formula balancing alignment score (85\%) and k-mer rarity (15\%). For difficult cases, Bit-Pop provides three fuzzy k-mer matching methods (fuzzy-kmer, fuzzy-seed, neighborhood) and an Expectation-Maximization (EM) post-processing algorithm for multi-candidate refinement. Benchmarked on simulated Illumina-like reads (0.1\%--10\% error rate, 100 bp) across three distantly related genomes (\textit{Escherichia coli}, \textit{Staphylococcus aureus}, \textit{Saccharomyces cerevisiae}), Bit-Pop achieves 99.3\% mapping rate and 99.9\% classification accuracy in 0.9s for 20,000 reads. On the CAMI Low Complexity benchmark with 62 microbial genomes (20,000 paired-end reads, 2$\times$150 bp), Bit-Pop achieves 92.0\% mapping rate and 85.9\% overall accuracy. The evo\_*\textgreater{}99.9\% identical strains) remain the most challenging subset at 59.8\% accuracy (with EM refinement), representing a fundamental information-theoretic limitation of short-read k-mer-based classification. Bit-Pop is designed as a focused tool for species classification, contamination detection, and targeted metagenomic analysis where users work with known genome collections.
+We present Bit-Pop, a high-performance tool for multi-genome DNA read classification that identifies which genome in a collection best matches each sequencing read. While existing aligners such as Bowtie2, BWA-MEM, and minimap2 map reads to single reference genomes, Bit-Pop addresses the complementary problem of simultaneous classification across collections of $N$ genomes. The pipeline combines four key stages: (1) an FM-index built via the SA-IS algorithm (libsais) for efficient k-mer lookup; (2) a top-$N$ rarest k-mer anchor filter with quality-aware filtering and reverse complement support; (3) a 2-bit XOR alignment achieving approximately 2.3 ns per 31-base chunk, with Myers edit distance as a fast alternative to Smith--Waterman (23--54$\times$ faster); and (4) a combined ranking formula balancing alignment score (85\%) and k-mer rarity (15\%). For difficult cases, Bit-Pop provides three fuzzy k-mer matching methods (fuzzy-kmer, fuzzy-seed, neighborhood) and an Expectation-Maximization (EM) post-processing algorithm for multi-candidate refinement. Benchmarked on simulated Illumina-like reads (0.1\%--10\% error rate, 100 bp) across three distantly related genomes (\textit{Escherichia coli}, \textit{Staphylococcus aureus}, \textit{Saccharomyces cerevisiae}), Bit-Pop achieves 99.3\% mapping rate and 99.9\% classification accuracy in 0.9s for 20,000 reads. On the CAMI Low Complexity benchmark with 62 microbial genomes (20,000 paired-end reads, 2$\times$150 bp), Bit-Pop achieves 92.0\% mapping rate and 85.9\% overall accuracy. The evo\_*$>$99.9\% identical strains) remain the most challenging subset at 59.8\% accuracy (with EM refinement), representing a fundamental information-theoretic limitation of short-read k-mer-based classification. Bit-Pop is designed as a focused tool for species classification, contamination detection, and targeted metagenomic analysis where users work with known genome collections.
 
 \textbf{Availability:} Source code at \url{https://github.com/mladenpop-oss/bit-pop} (MIT License). DOI: \url{https://doi.org/10.5281/zenodo.20043593}.
 \end{abstract}
@@ -180,7 +180,7 @@ The algorithm typically converges in 9--11 iterations. Key parameters:
     \item \textbf{Confidence threshold:} Only applies EM to reads with ambiguous assignments (default: 0.95).
 \end{itemize}
 
-On the CAMI benchmark, EM provides +1.4pp improvement on evo\_*\textgreater{}99.9\% identical strains) and +0.6pp overall improvement. However, detailed analysis shows EM fixes 805 wrong predictions but breaks 755 correct ones (net +50), confirming that the fundamental limitation is information-theoretic---abundance signal is insufficient to disambiguate sibling strains that share $>$99.9\% of their k-mers.
+On the CAMI benchmark, EM provides +1.4pp improvement on evo\_*$>$99.9\% identical strains) and +0.6pp overall improvement. However, detailed analysis shows EM fixes 805 wrong predictions but breaks 755 correct ones (net +50), confirming that the fundamental limitation is information-theoretic---abundance signal is insufficient to disambiguate sibling strains that share $>$99.9\% of their k-mers.
 
 \subsection{Parallel Mapping}
 
@@ -251,7 +251,7 @@ Time & $\sim$7.9s / 10k reads & 8 threads, $k=10$, top\_n=2 \\
 Numeric genomes & 85.5\% & $\sim$8,000 reads \\
 Other genomes & 88.3\% & $\sim$8,000 reads \\
 Sample\* genomes & 91.3\% & $\sim$2,000 reads \\
-evo\textgreater{}99.9\% identical strains) & 54.2\% & 4,162 reads \\
+evo\_*$>$99.9\% identical strains) & 54.2\% & 4,162 reads \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -259,13 +259,13 @@ evo\textgreater{}99.9\% identical strains) & 54.2\% & 4,162 reads \\
 The overall accuracy of 85.9\% represents a significant improvement over earlier versions (71.6\% with 2,500 reads). The improvement was achieved through:
 \begin{enumerate}
     \item \textbf{CAMI-specific genome naming:} The $\texttt{--cami}$ flag extracts genome names from filenames instead of FASTA headers, fixing a naming mismatch that caused accuracy to drop to 1.07\% in early versions.
-    \item \textbf{Preservation of evo\textgreater{}99.9\% identical strains) suffixes:} The \texttt{evo\_1049056.011} suffix is preserved, giving each strain a unique name in the index.
+    \item \textbf{Preservation of evo\_*$>$99.9\% identical strains) suffixes:} The \texttt{evo\_1049056.011} suffix is preserved, giving each strain a unique name in the index.
     \item \textbf{Increased dataset size:} 20,000 reads (vs. 2,500) provides better statistical significance.
 \end{enumerate}
 
 \textbf{Paired-end conflicts:} 35.5\% of read pairs have R1 and R2 mapping to different genomes, reducing effective accuracy. This is expected for reads originating from regions shared between genomes.
 
-\textbf{The evo\textgreater{}99.9\% identical strains) challenge:} The evo\_*\textgreater{}99.9\% identical strains from the same sample assembly) share most k-mers with each other and with their parent numeric genomes. This causes reads to map to the wrong strain or to the parent genome. The top misclassifications are:
+\textbf{The evo\_*$>$99.9\% identical strains) challenge:} The evo\_*\textgreater{}99.9\% identical strains from the same sample assembly) share most k-mers with each other and with their parent numeric genomes. This causes reads to map to the wrong strain or to the parent genome. The top misclassifications are:
 \begin{itemize}
     \item \texttt{evo\_1049056.011} $\rightarrow$ \texttt{evo\_1049056.013} (45$\times$)
     \item \texttt{evo\_1035930.029} $\rightarrow$ \texttt{evo\_1035930.032} (23$\times$)
@@ -287,12 +287,12 @@ Table~\ref{tab:em} shows the impact of EM post-processing on the CAMI benchmark.
 \textbf{Metric} & \textbf{Baseline} & \textbf{+ EM} & \textbf{Delta} \\
 \midrule
 Overall accuracy & 85.87\% & $\sim$86.5\% & +0.6pp \\
-evo\textgreater{}99.9\% identical strains) accuracy & 54.20\% & 55.6\% & +1.4pp \\
+evo\_*$>$99.9\% identical strains) accuracy & 54.20\% & 55.6\% & +1.4pp \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-EM provides modest improvement (+1.4pp on evo\textgreater{}99.9\% identical strains) because abundance signals are insufficient to disambiguate sibling strains sharing $>$99.9\% of their k-mers. The $\texttt{--confidence-threshold 0.95}$ parameter prevents EM from breaking high-confidence correct predictions.
+EM provides modest improvement (+1.4pp on evo\_*$>$99.9\% identical strains) because abundance signals are insufficient to disambiguate sibling strains sharing $>$99.9\% of their k-mers. The $\texttt{--confidence-threshold 0.95}$ parameter prevents EM from breaking high-confidence correct predictions.
 
 \subsection{Error Tolerance}
 
@@ -320,7 +320,7 @@ Classification accuracy remains at 100\% across all error rates: when Bit-Pop ma
 
 \subsection{Fuzzy K-mer Matching}
 
-The three fuzzy k-mer methods address the strain resolution challenge for evo\_*\textgreater{}99.9\% identical strains):
+The three fuzzy k-mer methods address the strain resolution challenge for evo\_*$>$99.9\% identical strains):
 
 \begin{table}[htbp]
 \centering
@@ -408,7 +408,7 @@ Kraken2 is better for broad metagenomics where you do not know what you are look
 Several limitations should be noted:
 
 \begin{itemize}
-\item \textbf{Strain-level resolution:} Genomes that are $>$99.9\% identical (same sample, different strains) share most k-mers. Reads may map to the wrong strain or to a parent genome. This is a fundamental information-theoretic limitation, not an algorithmic one. Empirical analysis on the CAMI Low dataset showed that reads from sibling evo\_*\textgreater{}99.9\% identical strains) (e.g., \texttt{evo\_1049056.015} vs \texttt{evo\_1049056.011}) are misassigned bidirectionally with near-equal frequency, confirming that the alignment signal does not carry sufficient discriminative information at 150 bp read length. The probability of a 150 bp read spanning a strain-specific SNP position is approximately $150/10^6 = 0.015\%$, meaning the vast majority of reads from near-identical strains are informationally indistinguishable. EM post-processing improved evo\_*\textgreater{}99.9\% identical strains) accuracy by +1.4 pp (58.4\% $\to$ 59.8\%), but population-level abundance signals were insufficient for reliable sibling strain disambiguation. Long reads (PacBio/Nanopore) or known SNP positions (VCF integration) would be required to surpass this barrier.
+\item \textbf{Strain-level resolution:} Genomes that are $>$99.9\% identical (same sample, different strains) share most k-mers. Reads may map to the wrong strain or to a parent genome. This is a fundamental information-theoretic limitation, not an algorithmic one. Empirical analysis on the CAMI Low dataset showed that reads from sibling evo\_*$>$99.9\% identical strains) (e.g., \texttt{evo\_1049056.015} vs \texttt{evo\_1049056.011}) are misassigned bidirectionally with near-equal frequency, confirming that the alignment signal does not carry sufficient discriminative information at 150 bp read length. The probability of a 150 bp read spanning a strain-specific SNP position is approximately $150/10^6 = 0.015\%$, meaning the vast majority of reads from near-identical strains are informationally indistinguishable. EM post-processing improved evo\_*$>$99.9\% identical strains) accuracy by +1.4 pp (58.4\% $\to$ 59.8\%), but population-level abundance signals were insufficient for reliable sibling strain disambiguation. Long reads (PacBio/Nanopore) or known SNP positions (VCF integration) would be required to surpass this barrier.
 \item \textbf{Proof-of-concept stage:} This work presents benchmarks on simulated reads and the CAMI Low Complexity dataset. The tool has not been validated on large-scale real datasets or compared directly with established aligners.
 \item \textbf{Mapping rate at high error rates:} While the top-$N$ anchor filter provides 99.3\% mapping rate at 0.1\% error rate, performance degrades to 23.4\% at 10\% error rate.
 \item \textbf{Paired-end conflicts:} 35.5\% of read pairs have R1 and R2 mapping to different genomes, reducing effective accuracy.
@@ -431,7 +431,7 @@ Planned improvements include:
 
 \section{Conclusion}
 
-Bit-Pop provides a solution for multi-genome DNA read classification that combines speed, compactness, and accuracy. By combining FM-index-based top-$N$ k-mer filtering with reverse complement support, bit-level XOR alignment (2.3 ns per 31-base chunk), Myers edit distance, and Smith--Waterman refinement, it achieves 99.3\% mapping rate and 99.9\% classification accuracy across bacterial and eukaryotic genomes. On the CAMI Low Complexity benchmark with 62 microbial genomes, Bit-Pop achieves 92.0\% mapping rate and 85.9\% overall accuracy. The evo\_*\textgreater{}99.9\% identical strains) remain challenging at 59.8\% accuracy (with EM refinement), representing a fundamental information-theoretic limitation of short-read k-mer-based classification. Bit-Pop is designed as a focused tool for species classification, contamination detection, and targeted metagenomic analysis where users work with known genome collections, filling a niche not addressed by existing general-purpose aligners.
+Bit-Pop provides a solution for multi-genome DNA read classification that combines speed, compactness, and accuracy. By combining FM-index-based top-$N$ k-mer filtering with reverse complement support, bit-level XOR alignment (2.3 ns per 31-base chunk), Myers edit distance, and Smith--Waterman refinement, it achieves 99.3\% mapping rate and 99.9\% classification accuracy across bacterial and eukaryotic genomes. On the CAMI Low Complexity benchmark with 62 microbial genomes, Bit-Pop achieves 92.0\% mapping rate and 85.9\% overall accuracy. The evo\_*$>$99.9\% identical strains) remain challenging at 59.8\% accuracy (with EM refinement), representing a fundamental information-theoretic limitation of short-read k-mer-based classification. Bit-Pop is designed as a focused tool for species classification, contamination detection, and targeted metagenomic analysis where users work with known genome collections, filling a niche not addressed by existing general-purpose aligners.
 
 \section*{Availability}
 
