@@ -395,6 +395,8 @@ Benchmark on the CAMI I Low Complexity dataset — 20K reads across 62 microbial
 | numeric | 82.65% | 86.36% | +3.71pp |
 | Sample* | 86.13% | 94.22% | +8.09pp |
 
+**EM limitation on near-identical strains**: Detailed analysis of evo_* reads shows EM improves classification by +5.14pp overall, but only +1.3pp on near-identical strains (>99.9% ANI). EM fixes 816 wrong predictions but breaks 770 correct ones (net +46). This confirms the limitation is **fundamentally information-theoretic, not algorithmic** — abundance signal is insufficient to disambiguate sibling strains that share >99.9% of their k-mers.
+
 **Paired-end conflicts**: 35.5% of read pairs have R1 and R2 mapping to different genomes, reducing effective accuracy.
 
 **Why is overall accuracy lower than single-genome benchmarks?** The evo_* genomes are >99.9% identical strains from the same sample assembly. They share most k-mers with each other, causing reads to map to the wrong strain. This is a fundamental limitation of k-mer-based classification for near-identical genomes, not a bug. SNP-aware weighting or ML would be required for strain-level resolution.
