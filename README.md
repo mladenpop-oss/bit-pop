@@ -96,6 +96,31 @@ bit-pop run genome.fna reads.fastq --method fuzzy-kmer --fuzzy-mismatches 1
 
 **When to use Bit-Pop**: Fast multi-genome classification where you need to identify which genome a read belongs to, rather than precise positional alignment.
 
+## Bit-Pop vs Kraken2 — Different Tools for Different Use Cases
+
+Kraken2 is like Google — knows everything, needs a datacenter, requires 100GB+ databases.
+Bit-Pop is like a local database — knows what you need, works offline, instant response.
+
+### Key Differences
+
+| | Bit-Pop | Kraken2 |
+|---|---------|---------|
+| Database size | MB (only your genomes) | 100GB+ (entire NCBI) |
+| Internet required | ❌ No | ✅ Yes (every update) |
+| Build time | 2 minutes | Hours to days |
+| Offline operation | ✅ Full | ❌ No |
+| Custom update | Seconds (add 1 genome) | Rebuild entire database |
+
+### When to Use Bit-Pop
+
+- **Clinical microbiology** — A hospital tracks 20 strains. Build the index once, classify every patient sample in 0.13s, offline, on a laptop.
+- **Field work** — A researcher in the Amazon with an offline laptop. 1.4GB on a USB drive, classify samples on-site.
+- **Outbreak detection** — A new bacterium appears. Download one genome (MB), add to index, classify immediately.
+- **Edge deployment** — Docker container on an IoT device, offline, instant response.
+
+Kraken2 is better for: broad metagenomics where you don't know what you're looking for.
+Bit-Pop is better for: **targeted searching** where you know what matters.
+
 ## Pipeline
 
 1. **FM-index** (SA-IS via libsais) for efficient k-mer lookup
