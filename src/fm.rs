@@ -492,6 +492,30 @@ impl FmIndex {
         positions
     }
 
+    /// Find which genomes contain this pattern.
+    /// Stops early once 2+ genomes are found (for efficiency).
+    /// Returns a HashSet of genome IDs where the pattern occurs.
+    pub fn find_genomes(&self, pattern: &[u8]) -> std::collections::HashSet<u32> {
+        let (lower, upper) = match self.backward_search(pattern) {
+            Some(r) => r,
+            None => return std::collections::HashSet::new(),
+        };
+
+        let mut genomes = std::collections::HashSet::new();
+        for rank in lower..upper {
+            let sa_pos = self.sa[rank];
+            let (genome_id, _) = self.sa_to_genome_pos(sa_pos);
+            genomes.insert(genome_id);
+            
+            // Stop early once we've seen 2+ genomes
+            if genomes.len() >= 2 {
+                break;
+            }
+        }
+
+        genomes
+    }
+
     /// Find all positions where spaced pattern occurs.
     /// Only matches on positions where mask[i] == true.
     pub fn find_positions_spaced(

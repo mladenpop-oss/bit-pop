@@ -7,8 +7,8 @@
     "strain_details": []
   },
   "parameters": {
-    "kmer_size": 25,
-    "max_parent_size_mb": 50,
-    "extraction_time_seconds": 1.65
+    "kmer_size": 15,
+    "max_parent_size_mb": 500,
+    "extraction_time_seconds": 1.53
   }
 }

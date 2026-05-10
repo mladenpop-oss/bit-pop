@@ -54,6 +54,9 @@ enum Commands {
     Fetch(FetchArgs),
     /// Update cached genomes with latest versions from NCBI
     Update(UpdateArgs),
+
+    /// Apply EM algorithm for soft-assignment classification
+    Em(EmArgs),
 }
 
 #[derive(clap::Args)]
@@ -145,6 +148,10 @@ struct RunArgs {
     #[cfg(feature = "mmap")]
     #[arg(long)]
     mmap: bool,
+
+    /// Apply EM algorithm for soft-assignment classification (improves strain resolution)
+    #[arg(long)]
+    em: bool,
 }
 
 #[derive(clap::Args)]
@@ -240,6 +247,10 @@ struct MapArgs {
     /// Maximum number of mismatches for fuzzy matching (default: 1)
     #[arg(long, default_value = "1")]
     fuzzy_mismatches: usize,
+
+    /// Apply EM algorithm for soft-assignment classification (improves strain resolution)
+    #[arg(long)]
+    em: bool,
 }
 
 #[derive(clap::Args)]
@@ -362,6 +373,33 @@ struct UpdateArgs {
     force: bool,
 }
 
+#[derive(clap::Args)]
+struct EmArgs {
+    /// Input SAM file (bit-pop mapping output)
+    #[arg(short, long, required = true)]
+    input: PathBuf,
+
+    /// Output SAM file with EM improved classifications
+    #[arg(short, long, required = true)]
+    output: PathBuf,
+
+    /// Convergence threshold (KL divergence)
+    #[arg(long, default_value = "0.001")]
+    convergence: f64,
+
+    /// Maximum EM iterations
+    #[arg(long, default_value = "50")]
+    max_iterations: usize,
+
+    /// Softmax temperature (lower = sharper)
+    #[arg(long, default_value = "0.1")]
+    temperature: f64,
+
+    /// Top-K genomes per read for EM
+    #[arg(long, default_value = "10")]
+    top_k: usize,
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -390,6 +428,10 @@ async fn main() {
         }
         Commands::Fetch(args) => cmd_fetch(&args, cli.verbose).await,
         Commands::Update(args) => cmd_update(&args, cli.verbose).await,
+        Commands::Em(args) => {
+            cmd_em(&args);
+            Ok(())
+        }
     } {
         eprintln!("Error: {}", e);
         std::process::exit(1);
@@ -1924,4 +1966,207 @@ fn parse_sam_summary(path: &Path) -> std::collections::HashMap<String, usize> {
     }
 
     counts
+}
+
+fn cmd_em(args: &EmArgs) {
+    use bit_pop::em::{EMClassifier, EMConfig, ReadMappings};
+    use std::collections::HashMap;
+    use std::io::{BufRead, BufReader, Write};
+    use std::time::Instant;
+
+    fn strip_read_suffix(name: &str) -> &str {
+        // Match Python: rstrip("/1").rstrip("/2")
+        // Python rstrip strips CHARACTERS not suffix, so:
+        // "READ/1".rstrip("/1") → "READ" (strips "1" and "/")
+        // "READ/2".rstrip("/1") → "READ/2" (no change)
+        // "READ/2".rstrip("/2") → "READ"
+        let name = name.strip_suffix("/1").unwrap_or(name);
+        name.strip_suffix("/2").unwrap_or(name)
+    }
+
+    fn extract_nm_tag(parts: &[&str]) -> u32 {
+        for field in parts.iter().skip(11) {
+            if let Some(nm_str) = field.strip_prefix("NM:i:") {
+                return nm_str.parse().unwrap_or(0);
+            }
+        }
+        0
+    }
+
+    let start = Instant::now();
+
+    println!("EM Classifier - Soft Assignment for Strain Resolution");
+    println!("======================================================");
+    println!();
+    println!("Loading SAM: {}", args.input.to_string_lossy());
+
+    let file = std::fs::File::open(&args.input).unwrap_or_else(|e| {
+        eprintln!("Error opening SAM file: {}", e);
+        std::process::exit(1);
+    });
+    let reader = BufReader::new(file);
+
+    // Collect header lines and mappings
+    let mut header_lines = Vec::new();
+    let mut read_genomes: HashMap<String, Vec<(String, f64)>> = HashMap::new();
+
+    for line in reader.lines() {
+        let line = line.unwrap_or_else(|e| {
+            eprintln!("Error reading line: {}", e);
+            std::process::exit(1);
+        });
+
+        if line.starts_with('@') {
+            header_lines.push(line);
+            continue;
+        }
+
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() < 11 {
+            continue;
+        }
+
+        let qname = strip_read_suffix(parts[0]).to_string();
+        let flag: u16 = parts[1].parse().unwrap_or(0);
+        let rname = parts[2];
+        let mapq: u16 = if parts[4] != "0" {
+            parts[4].parse().unwrap_or(0)
+        } else {
+            0
+        };
+
+        let is_supplementary = (flag & 0x800) != 0;
+        let mut score = mapq as f64 / 60.0;
+
+        if is_supplementary {
+            score *= 0.5;
+        }
+
+        let nm = extract_nm_tag(&parts);
+        let seq = parts.get(9).unwrap_or(&"");
+        let read_len = seq.len() as f64;
+        if read_len > 0.0 && nm > 0 {
+            let mismatch_rate = nm as f64 / read_len;
+            let nm_score = 1.0 - mismatch_rate;
+            score = score * 0.7 + nm_score * 0.3;
+        }
+
+        if rname != "*" {
+            read_genomes
+                .entry(qname)
+                .or_default()
+                .push((rname.to_string(), score));
+        }
+    }
+
+    let total_reads = read_genomes.len();
+    let total_alignments: usize = read_genomes.values().map(|v| v.len()).sum();
+
+    println!("  Loaded {} reads with mappings", total_reads);
+    println!("  Total alignments: {}", total_alignments);
+
+    // Build ReadMappings for EM
+    let em_mappings: ReadMappings = read_genomes
+        .iter()
+        .flat_map(|(read_name, genomes)| {
+            genomes.iter().map(|(genome, score)| {
+                (read_name.clone(), genome.clone(), *score)
+            }).collect::<Vec<_>>()
+        })
+        .collect();
+
+    // Run EM
+    println!();
+    println!("Running EM algorithm...");
+    println!("  Convergence threshold: {}", args.convergence);
+    println!("  Max iterations: {}", args.max_iterations);
+    println!("  Temperature: {}", args.temperature);
+    println!("  Top-K: {}", args.top_k);
+    println!();
+
+    let em_start = Instant::now();
+
+    let mut em = EMClassifier::new(EMConfig {
+        convergence_threshold: args.convergence,
+        max_iterations: args.max_iterations,
+        temperature: args.temperature,
+        top_k: args.top_k,
+        ..EMConfig::default()
+    });
+
+    let hard_assignments = em.classify(&em_mappings);
+
+    let em_time = em_start.elapsed();
+    println!("EM completed in {:.2}s", em_time.as_secs_f64());
+    println!("  Iterations: {}", em.iterations_run);
+    println!("  Final KL divergence: {:.6}", em.final_kl);
+    println!();
+
+    // Create hard assignment lookup
+    let hard_map: HashMap<String, Option<String>> = hard_assignments.into_iter().collect();
+
+    // Write output SAM with EM improved classifications
+    println!("Writing EM-improved SAM: {}", args.output.to_string_lossy());
+
+    let mut out_file = std::fs::File::create(&args.output).unwrap_or_else(|e| {
+        eprintln!("Error creating output file: {}", e);
+        std::process::exit(1);
+    });
+
+    // Write headers
+    for header in &header_lines {
+        writeln!(out_file, "{}", header).unwrap();
+    }
+
+    // Re-read SAM and write with EM improvements
+    let file = std::fs::File::open(&args.input).unwrap();
+    let reader = BufReader::new(file);
+
+    let mut changed = 0;
+    let mut total = 0;
+
+    for line in reader.lines() {
+        let line = line.unwrap();
+        if line.starts_with('@') {
+            writeln!(out_file, "{}", line).unwrap();
+            continue;
+        }
+
+        let mut parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() < 11 {
+            writeln!(out_file, "{}", line).unwrap();
+            continue;
+        }
+
+        let qname = strip_read_suffix(parts[0]).to_string();
+        let flag: u16 = parts[1].parse().unwrap_or(0);
+        let current_rname = parts[2];
+        let is_primary = (flag & 0x900) == 0;
+
+        total += 1;
+
+        // Check if this read has an EM assignment
+        if let Some(em_genome_opt) = hard_map.get(&qname) {
+            if let Some(em_genome) = em_genome_opt {
+                if is_primary && current_rname != em_genome.as_str() {
+                    parts[2] = em_genome.as_str();
+                    parts[4] = "40";
+
+                    let new_line = parts.join("\t");
+                    writeln!(out_file, "{}", new_line).unwrap();
+                    changed += 1;
+                    continue;
+                }
+            }
+        }
+
+        writeln!(out_file, "{}", line).unwrap();
+    }
+
+    let elapsed = start.elapsed();
+
+    println!("  Total lines processed: {}", total);
+    println!("  Classifications changed: {}", changed);
+    println!();
+    println!("EM completed in {:.2}s total", elapsed.as_secs_f64());
 }

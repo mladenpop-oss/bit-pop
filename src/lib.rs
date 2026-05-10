@@ -92,6 +92,7 @@
 pub mod align;
 pub mod cache;
 pub mod delta;
+pub mod em;
 pub mod fasta;
 pub mod fastq;
 pub mod fm;

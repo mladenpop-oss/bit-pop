@@ -3,6 +3,34 @@ use std::io::{self, Write};
 
 use crate::{InsertSizeStats, MappingResult, PairedMappingResult, QualityMappingResult};
 
+/// Compute NM tag (edit distance) from CIGAR string.
+/// Counts mismatches (X operations) and insertions (I operations).
+/// Deletions (D) don't count toward NM in standard SAM format.
+fn compute_nm_from_cigar(cigar: &str) -> usize {
+    let mut nm = 0usize;
+    let mut num_str = String::new();
+
+    for ch in cigar.chars() {
+        if ch.is_ascii_digit() {
+            num_str.push(ch);
+        } else {
+            if !num_str.is_empty() {
+                let count = num_str.parse::<usize>().unwrap_or(1);
+                match ch {
+                    'X' => nm += count, // Mismatches count toward NM
+                    'I' => nm += count, // Insertions count toward NM
+                    'D' => {}           // Deletions don't count toward NM
+                    'M' | 'N' | 'S' | 'H' | 'P' => {}
+                    _ => {}
+                }
+            }
+            num_str.clear();
+        }
+    }
+
+    nm
+}
+
 /// SAM FLAG bits
 pub mod flag {
     pub const PAIRED: u16 = 0x1;
@@ -68,9 +96,12 @@ impl SamWriter {
         // POS is 1-based in SAM
         let pos = result.position + 1;
 
+        // NM tag: edit distance (computed from CIGAR)
+        let nm = compute_nm_from_cigar(&result.cigar);
+
         writeln!(
             self.file,
-            "{}\t{}\t{}\t{}\t{}\t{}\t*\t0\t0\t{}\t*",
+            "{}\t{}\t{}\t{}\t{}\t{}\t*\t0\t0\t{}\t*\tNM:i:{}",
             read_name,    // QNAME
             sam_flag,     // FLAG
             genome_name,  // RNAME
@@ -78,6 +109,7 @@ impl SamWriter {
             mapq,         // MAPQ
             result.cigar, // CIGAR
             read_seq,     // SEQ
+            nm            // NM tag
         )
     }
 
@@ -163,12 +195,15 @@ impl SamWriter {
             let mapq = ((result.combined_score * 60.0) as u16).min(60);
             let pos = result.position + 1;
 
+            // NM tag: edit distance (computed from CIGAR)
+            let nm = compute_nm_from_cigar(&result.cigar);
+
             // QUAL field: original quality scores from FASTQ
             let qual_str = String::from_utf8_lossy(&result.quality_scores);
 
             writeln!(
                 self.file,
-                "{}\t{}\t{}\t{}\t{}\t{}\t*\t0\t0\t{}\t{}\tMQ:f:{}",
+                "{}\t{}\t{}\t{}\t{}\t{}\t*\t0\t0\t{}\t{}\tMQ:f:{}\tNM:i:{}",
                 read_name,
                 sam_flag,
                 gname,
@@ -178,6 +213,7 @@ impl SamWriter {
                 read_seq,
                 qual_str,
                 result.quality_penalty,
+                nm,
             )?;
         }
 
