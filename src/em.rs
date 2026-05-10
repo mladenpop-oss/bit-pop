@@ -268,7 +268,7 @@ impl EMClassifier {
             .map(|(read_name, probs)| {
                 let best = probs
                     .iter()
-                    .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal));
                 (read_name.clone(), best.map(|(g, _)| g.clone()))
             })
             .collect()
@@ -329,7 +329,7 @@ fn normalize_to_probabilities(
 
     for &(genome, score) in &top {
         let adjusted = (score - max_logit) / temperature;
-        let exp_val = (adjusted.max(-50.0).min(50.0)).exp();
+        let exp_val = adjusted.clamp(-50.0, 50.0).exp();
         total += exp_val;
         exps.insert(genome.clone(), exp_val);
     }
@@ -337,7 +337,7 @@ fn normalize_to_probabilities(
     if total == 0.0 {
         // Uniform distribution as fallback
         let n = top.len();
-        exps.into_iter().map(|(g, _)| (g, 1.0 / n as f64)).collect()
+        exps.into_keys().map(|g| (g, 1.0 / n as f64)).collect()
     } else {
         exps.into_iter().map(|(g, e)| (g, e / total)).collect()
     }
