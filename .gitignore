@@ -51,6 +51,13 @@ SRR*.fastq
 # Benchmark output / large data files
 *.bitpop
 
+# Docs - keep local only (except CITATION.cff)
+docs/paper.pdf
+docs/paper.tex
+docs/paper_submission.pdf
+docs/paper_submission.tex
+docs/references.bib
+
 # Private development files
 Plan.txt
 razvoj.md
