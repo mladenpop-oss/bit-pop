@@ -375,7 +375,7 @@ Benchmark on the CAMI I Low Complexity dataset — 20K reads across 62 microbial
 |--------|-------|
 | Mapping rate | 92.02% (30,105/40,000 paired-end reads) |
 | Overall accuracy | 85.87% |
-| Time | ~7.9s per 10k reads |
+| Time | ~60s per 10k reads |
 
 **Breakdown by genome type**:
 
