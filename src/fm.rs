@@ -255,7 +255,7 @@ impl SpacedSeed {
     }
 
     pub fn default_v1() -> Self {
-        SpacedSeed::from_binary("11101001110111")
+        SpacedSeed::from_binary("11111011111111")
     }
 
     pub fn len(&self) -> usize {
@@ -277,6 +277,21 @@ impl SpacedSeed {
             .filter(|&(i, _)| i < self.pattern.len() && self.pattern[i])
             .map(|(_, &b)| b)
             .collect()
+    }
+
+    /// Encode spaced k-mer as u64 hash key for fast lookup.
+    /// Uses 2 bits per match position (A=1,C=2,G=3,T=4 → 0,1,2,3).
+    pub fn encode_as_hash(&self, kmer: &[u8]) -> u64 {
+        let mut hash: u64 = 0;
+        let mut bit_pos = 0;
+        for i in 0..kmer.len().min(self.pattern.len()) {
+            if self.pattern[i] {
+                let val = ((kmer[i].saturating_sub(1)) & 3) as u64;
+                hash |= val << bit_pos;
+                bit_pos += 2;
+            }
+        }
+        hash
     }
 }
 
@@ -796,7 +811,7 @@ mod tests {
             let a = sa[i];
             let b = sa[i + 1];
             assert!(
-                &s[a..] <= &s[b..],
+                s[a..] <= s[b..],
                 "SA not sorted at {}: suffix[{}]={:?} > suffix[{}]={:?}",
                 i,
                 a,
@@ -875,8 +890,8 @@ mod tests {
         let seq: Vec<u8> = (0..400u32).map(|i| ((i % 4) + 1) as u8).collect(); // ACGT repeated 100x
         let index = FmIndex::build(&[("test", &seq)]);
 
-        assert!(index.count_occurrences(&vec![1, 2, 3, 4]) >= 100);
-        assert!(index.count_occurrences(&vec![1, 2, 3, 4, 1, 2, 3, 4]) >= 50);
+        assert!(index.count_occurrences(&[1, 2, 3, 4]) >= 100);
+        assert!(index.count_occurrences(&[1, 2, 3, 4, 1, 2, 3, 4]) >= 50);
     }
 
     #[test]
@@ -909,7 +924,7 @@ mod tests {
     fn test_short_pattern() {
         let seq = vec![1, 2, 3, 4, 1, 2, 3, 4];
         let index = FmIndex::build(&[("test", &seq)]);
-        assert!(index.backward_search(&vec![1]).is_some()); // A
+        assert!(index.backward_search(&[1]).is_some()); // A
     }
 
     #[test]
@@ -917,7 +932,7 @@ mod tests {
         let g1 = vec![1, 2, 3, 4];
         let g2 = vec![4, 3, 2, 1];
         let index = FmIndex::build(&[("g1", &g1), ("g2", &g2)]);
-        let positions = index.find_positions(&vec![4, 3, 2, 1], 100); // TGCA
+        let positions = index.find_positions(&[4, 3, 2, 1], 100); // TGCA
         if !positions.is_empty() {
             assert_eq!(positions[0].0, 1);
         }
@@ -928,14 +943,14 @@ mod tests {
         let seq: Vec<u8> = (0..40u32).map(|i| ((i % 4) + 1) as u8).collect(); // ACGT x10
         let index = FmIndex::build(&[("test", &seq)]);
         // ACGTACGT (8 chars) appears at positions 0,4,8,12,16,20,24,28,32 = 9 times
-        assert!(index.count_occurrences(&vec![1, 2, 3, 4, 1, 2, 3, 4]) >= 9);
+        assert!(index.count_occurrences(&[1, 2, 3, 4, 1, 2, 3, 4]) >= 9);
     }
 
     #[test]
     fn test_single_base_genome() {
         let seq = vec![1]; // A
         let index = FmIndex::build(&[("test", &seq)]);
-        assert!(index.backward_search(&vec![1]).is_some());
+        assert!(index.backward_search(&[1]).is_some());
     }
 
     #[test]
@@ -956,7 +971,7 @@ mod tests {
     fn test_larger_genome() {
         let seq: Vec<u8> = (0..1000u32).map(|i| ((i % 4) + 1) as u8).collect();
         let index = FmIndex::build(&[("test", &seq)]);
-        assert!(index.count_occurrences(&vec![1, 2, 3, 4]) >= 250);
+        assert!(index.count_occurrences(&[1, 2, 3, 4]) >= 250);
     }
 
     #[test]
@@ -976,11 +991,15 @@ mod tests {
 
     #[test]
     fn test_backward_search_spaced() {
-        let seq = vec![1, 2, 3, 1, 4, 1, 2, 4, 1, 2, 3, 4, 1, 2];
+        let seq = vec![
+            4, 3, 2, 1, // padding
+            1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 1, 2, // ACGTACGTACGTAC at position 4
+            4, 3, 2, 1, // padding
+        ];
         let index = FmIndex::build(&[("test", &seq)]);
 
         let kmer = vec![1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 1, 2];
-        let mask = SpacedSeed::default_v1().pattern;
+        let mask = vec![true; 14];
 
         let result = index.backward_search_spaced(&kmer, &mask);
         assert!(
@@ -991,15 +1010,19 @@ mod tests {
 
     #[test]
     fn test_find_positions_spaced() {
-        let seq = vec![1, 2, 3, 1, 4, 1, 2, 4, 1, 2, 3, 4, 1, 2];
+        let seq = vec![
+            4, 3, 2, 1, // padding
+            1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 1, 2, // ACGTACGTACGTAC at position 4
+            4, 3, 2, 1, // padding
+        ];
         let index = FmIndex::build(&[("test", &seq)]);
 
         let kmer = vec![1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 1, 2];
-        let mask = SpacedSeed::default_v1().pattern;
+        let mask = vec![true; 14];
 
         let positions = index.find_positions_spaced(&kmer, &mask, 100);
         assert!(!positions.is_empty(), "Should find at least one position");
-        assert_eq!(positions[0].0, 0);
+        assert_eq!(positions[0].1, 4);
     }
 
     #[test]

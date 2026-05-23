@@ -200,7 +200,7 @@ fn bench_fm_build(c: &mut Criterion) {
     for (label, size) in &sizes {
         let seq = encode_dna(&pseudo_random_sequence(*size));
         group.throughput(Throughput::Elements(*size as u64));
-        group.bench_function(format!("{label}"), |b| {
+        group.bench_function(label.to_string(), |b| {
             b.iter(|| FmIndex::build(&[("test", &seq)]))
         });
     }

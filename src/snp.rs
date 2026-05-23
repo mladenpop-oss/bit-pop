@@ -16,7 +16,6 @@
 /// detector.build_snp_map(3);
 /// assert!(detector.is_known_snp(0, 100).is_some());
 /// ```
-
 use std::collections::HashMap;
 
 /// A single nucleotide polymorphism detected from mismatch patterns.
@@ -45,6 +44,12 @@ pub struct SnpDetector {
     snps: Vec<Snp>,
     /// Whether SNP map has been built
     built: bool,
+}
+
+impl Default for SnpDetector {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SnpDetector {
@@ -107,9 +112,9 @@ impl SnpDetector {
             return None;
         }
 
-        self.snps.iter().find(|snp| {
-            snp.genome_id == genome_id && snp.position == position
-        })
+        self.snps
+            .iter()
+            .find(|snp| snp.genome_id == genome_id && snp.position == position)
     }
 
     /// Check if a mismatch is on a known SNP position.
@@ -126,7 +131,13 @@ impl SnpDetector {
     ///
     /// # Returns
     /// true if this mismatch is on a known SNP position
-    pub fn is_snp_mismatch(&self, genome_id: u32, position: u32, read_base: u8, genome_base: u8) -> bool {
+    pub fn is_snp_mismatch(
+        &self,
+        genome_id: u32,
+        position: u32,
+        read_base: u8,
+        genome_base: u8,
+    ) -> bool {
         match self.is_known_snp(genome_id, position) {
             Some(snp) => snp.alt_base == read_base && snp.ref_base == genome_base,
             None => false,

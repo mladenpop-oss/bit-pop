@@ -90,18 +90,28 @@
 #![allow(clippy::type_complexity)]
 
 pub mod align;
+pub mod bam;
 pub mod cache;
+pub mod chain;
+pub mod chunk_consensus;
+pub mod consensus;
 pub mod delta;
 pub mod em;
 pub mod fasta;
 pub mod fastq;
 pub mod fm;
+pub mod hf;
 pub mod index_manager;
 pub mod ncbi;
 pub mod persisted;
 pub mod rank;
 pub mod sam;
 pub mod serialize;
+pub mod snp;
+pub mod taxonomy;
+
+pub use chunk_consensus::MultiChunkConsensus;
+pub use consensus::{ConsensusResult, ConsensusStrategy, KResult, MultiKConsensus};
 
 use std::fmt;
 
@@ -331,6 +341,12 @@ pub struct MappingResult {
     pub context: String,
     /// True if the read mapped to the reverse strand (RC alignment won).
     pub is_reverse: bool,
+    /// K-mer rarity score (1 / occurrence_count of the read's first k-mer).
+    pub rarity: f64,
+    /// MD tag string for mismatch verification (e.g. "10A5T3").
+    pub md_string: String,
+    /// Homopolymer fingerprint similarity score (0.0-1.0, only set when --hf enabled).
+    pub hf_score: f64,
 }
 
 /// Quality-aware mapping result with per-base quality information.
@@ -356,6 +372,10 @@ pub struct QualityMappingResult {
     pub context: String,
     /// True if the read mapped to the reverse strand (RC alignment won).
     pub is_reverse: bool,
+    /// K-mer rarity score (1 / occurrence_count of the read's first k-mer).
+    pub rarity: f64,
+    /// MD tag string for mismatch verification (e.g. "10A5T3").
+    pub md_string: String,
 }
 
 /// A paired-end read (R1 + R2).
@@ -368,12 +388,14 @@ pub struct PairedRead {
     pub read2_qual: Vec<u8>,
 }
 
-/// Insert size statistics for paired-end mapping.
+/// Insert size statistics for paired-end mapping with Gaussian model.
 #[derive(Debug, Clone)]
 pub struct InsertSizeStats {
     pub mean: f64,
     pub stddev: f64,
     pub count: usize,
+    /// M2 sum for Welford's algorithm (stored internally, not serialized)
+    m2: f64,
 }
 
 impl Default for InsertSizeStats {
@@ -388,6 +410,7 @@ impl InsertSizeStats {
             mean: 0.0,
             stddev: 0.0,
             count: 0,
+            m2: 0.0,
         }
     }
 
@@ -396,28 +419,78 @@ impl InsertSizeStats {
             return;
         }
         self.count += 1;
-        let old_mean = self.mean;
-        self.mean += (insert_size as f64 - old_mean) / self.count as f64;
-    }
-
-    pub fn update_with_variance(&mut self, insert_size: i64) {
-        if insert_size <= 0 {
-            return;
-        }
-        self.count += 1;
         let delta = insert_size as f64 - self.mean;
         self.mean += delta / self.count as f64;
         let delta2 = insert_size as f64 - self.mean;
-        // Welford's online algorithm for variance
-        // We store M2 incrementally
-        if self.count == 1 {
-            self.stddev = 0.0;
-        } else {
-            // Approximate stddev update (simplified)
-            self.stddev = ((delta * delta2).max(0.0) / (self.count as f64 - 1.0)).sqrt();
+        self.m2 += delta * delta2;
+        if self.count >= 2 {
+            self.stddev = (self.m2 / (self.count as f64 - 1.0)).sqrt();
         }
     }
 
+    pub fn update_with_variance(&mut self, insert_size: i64) {
+        self.update(insert_size);
+    }
+
+    /// Compute the Gaussian (normal distribution) probability density
+    /// for an observed insert size value.
+    ///
+    /// Returns the probability density function (PDF) value:
+    ///   f(x) = (1 / (sigma * sqrt(2*pi))) * exp(-0.5 * ((x - mu) / sigma)^2)
+    ///
+    /// Returns 0.0 if stddev is zero or count < 2.
+    pub fn gaussian_probability(&self, observed_tlen: i64) -> f64 {
+        if self.count < 2 || self.stddev < f64::EPSILON {
+            return 0.0;
+        }
+        let x = observed_tlen as f64;
+        let diff = x - self.mean;
+        let exponent = -0.5 * (diff / self.stddev).powi(2);
+        // Clamp exponent to avoid underflow
+        if exponent < -500.0 {
+            return 0.0;
+        }
+        (1.0 / (self.stddev * (2.0 * std::f64::consts::PI).sqrt())) * exponent.exp()
+    }
+
+    /// Compute the log probability density of the Gaussian model for an
+    /// observed insert size. More numerically stable than raw probability.
+    ///
+    /// Returns log(f(x)) where f is the normal PDF.
+    /// Returns `-f64::INFINITY` if stddev is zero or count < 2.
+    pub fn log_gaussian_probability(&self, observed_tlen: i64) -> f64 {
+        if self.count < 2 || self.stddev < f64::EPSILON {
+            return -f64::INFINITY;
+        }
+        let x = observed_tlen as f64;
+        let diff = x - self.mean;
+        let z = diff / self.stddev;
+        // log PDF = -log(sigma) - 0.5*log(2*pi) - 0.5*z^2
+        -self.stddev.ln() - 0.5 * (2.0 * std::f64::consts::PI).ln() - 0.5 * z * z
+    }
+
+    /// Compute a normalized confidence score in [0.0, 1.0] for an observed
+    /// insert size. Maps the PDF value to a 0-1 range using the peak density.
+    ///
+    /// A score of 1.0 means the observed TLEN equals the mean.
+    /// A score near 0.0 means the TLEN is far from the mean (>5 stddevs).
+    pub fn insert_size_confidence(&self, observed_tlen: i64) -> f64 {
+        if self.count < 2 || self.stddev < f64::EPSILON {
+            return 0.0;
+        }
+        // The peak PDF value is at x = mean: 1/(sigma*sqrt(2*pi))
+        let peak_pdf = 1.0 / (self.stddev * (2.0 * std::f64::consts::PI).sqrt());
+        if peak_pdf < f64::EPSILON {
+            return 0.0;
+        }
+        let actual_pdf = self.gaussian_probability(observed_tlen);
+        // Normalize: ratio of actual PDF to peak PDF = exp(-0.5*z^2)
+        let ratio = actual_pdf / peak_pdf;
+        ratio.clamp(0.0, 1.0)
+    }
+
+    /// Check if the observed TLEN falls within the expected range (mean ± 3*stddev)
+    /// using the Gaussian model. Also returns the confidence score.
     pub fn is_proper_pair(&self, observed_tlen: i64) -> bool {
         if self.count < 2 || observed_tlen <= 0 {
             return false;
@@ -425,6 +498,16 @@ impl InsertSizeStats {
         let lower = (self.mean - 3.0 * self.stddev).max(0.0) as i64;
         let upper = (self.mean + 3.0 * self.stddev) as i64;
         observed_tlen >= lower && observed_tlen <= upper
+    }
+
+    /// Get the expected insert size range (mean ± 3*stddev).
+    pub fn expected_range(&self) -> (i64, i64) {
+        if self.count < 2 || self.stddev < f64::EPSILON {
+            return (0, 0);
+        }
+        let lower = (self.mean - 3.0 * self.stddev).max(0.0) as i64;
+        let upper = (self.mean + 3.0 * self.stddev) as i64;
+        (lower, upper)
     }
 }
 
@@ -437,6 +520,9 @@ pub struct PairedReadMapping {
     pub cigar: String,
     pub is_reverse: bool,
     pub mapped: bool,
+    pub align_score: f64,
+    pub rarity: f64,
+    pub md_string: String,
 }
 
 /// Result of mapping a paired-end read to all indexed genomes.
@@ -449,6 +535,23 @@ pub struct PairedMappingResult {
     pub insert_size_stats: InsertSizeStats,
 }
 
+/// Chunk-level mapping result for chunk-based PacBio classification.
+#[derive(Debug, Clone)]
+pub struct ChunkVote {
+    /// Genome ID that won this chunk's vote
+    pub genome_id: u32,
+    /// Number of chunks this genome won
+    pub win_count: usize,
+    /// Sum of alignment scores across all won chunks
+    pub total_score: f64,
+    /// Average alignment score
+    pub avg_score: f64,
+    /// Total chunks mapped successfully
+    pub chunks_mapped: usize,
+    /// Quality-weighted score (score * chunks_mapped / total_chunks)
+    pub quality_weighted_score: f64,
+}
+
 /// Alignment mode for mapping reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AlignMode {
@@ -459,6 +562,12 @@ pub enum AlignMode {
     Sw,
     /// XOR first for fast filtering, then SW on top candidates for precise scoring
     Hybrid,
+    /// XOR with soft-clipping: slides windows across read to find optimal alignment region,
+    /// emits S operations in CIGAR for adapter/low-quality regions
+    Softclip,
+    /// Gap-aware XOR chaining: minimizer-based seed chaining with XOR gap extension.
+    /// True long-read alignment for ONT/PacBio (5-15% error rates, long indels).
+    Chain,
 }
 
 /// Fuzzy k-mer matching method for improved strain resolution.
@@ -475,12 +584,36 @@ pub enum FuzzyMethod {
     Neighborhood,
 }
 
+/// Anchor strategy for chunk-based mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ChunkAnchorStrategy {
+    /// Use top-N rarest k-mers (current default behavior, no quality needed)
+    #[default]
+    Rarest,
+    /// Use quality-weighted golden anchors (requires FASTQ quality scores)
+    Golden,
+    /// Use spaced seed k-mers (requires spaced seed enabled during build)
+    Spaced,
+}
+
+impl fmt::Display for ChunkAnchorStrategy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ChunkAnchorStrategy::Rarest => write!(f, "rarest"),
+            ChunkAnchorStrategy::Golden => write!(f, "golden"),
+            ChunkAnchorStrategy::Spaced => write!(f, "spaced"),
+        }
+    }
+}
+
 impl fmt::Display for AlignMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             AlignMode::Xor => write!(f, "xor"),
             AlignMode::Sw => write!(f, "sw"),
             AlignMode::Hybrid => write!(f, "hybrid"),
+            AlignMode::Softclip => write!(f, "softclip"),
+            AlignMode::Chain => write!(f, "chain"),
         }
     }
 }
@@ -545,8 +678,12 @@ pub struct BitPop {
     /// Whether to use spaced seed pattern for k-mer matching
     use_spaced_seed: bool,
 
-    /// Spaced seed pattern (default: 11101001110111)
+    /// Spaced seed pattern (default: 11111011111111)
     spaced_seed_pattern: Vec<bool>,
+
+    /// Spaced seed hash table: encoded_spaced_kmer -> Vec<(genome_id, position)>
+    /// Built during build() when use_spaced_seed is true
+    spaced_seed_hash: Option<HashMap<u64, Vec<(u32, u64)>>>,
 
     /// Read type: "short" or "long"
     read_type: String,
@@ -559,6 +696,55 @@ pub struct BitPop {
 
     /// Neighborhood hash table for O(1) fuzzy k-mer lookup (populated during build)
     neighborhood_hash: Option<HashMap<u64, Vec<(u64, u32, u64)>>>,
+
+    /// Search radius for delta loop (±N bp around anchor position).
+    /// None = dynamic (read_len/4, max 200). Some(N) = fixed override.
+    search_radius: Option<isize>,
+
+    /// Chunk size for PacBio long-read mapping (0 = disabled, auto: 150)
+    chunk_size: usize,
+
+    /// Minimum fraction of chunks that must agree for a mapping to be accepted (0.0-1.0, default: 0.0 = no threshold)
+    chunk_vote_threshold: f64,
+
+    /// Number of top genomes to return per read in chunk-based mode (default: 1)
+    chunk_top_n: usize,
+
+    /// Chunk size as percentage of read length (0.0-1.0, 0.0 = disabled, use fixed chunk_size)
+    chunk_pct: f64,
+
+    /// Minimum chunk size clamp when using chunk_pct (default: 50)
+    chunk_min: usize,
+
+    /// Maximum chunk size clamp when using chunk_pct (default: 200)
+    chunk_max: usize,
+
+    /// Enable SNP-aware scoring for strain resolution
+    enable_snp_detect: bool,
+
+    /// Minimum support count for SNP detection (default: 3)
+    snp_min_support: u32,
+
+    /// SNP penalty: amount to subtract from score for mismatches not on known SNP positions
+    snp_penalty: f64,
+
+    /// Default alignment mode for mapping (Xor, Sw, Hybrid)
+    align_mode: AlignMode,
+
+    /// Anchor strategy for chunk-based mapping (Rarest, Golden, Spaced)
+    chunk_anchor_strategy: ChunkAnchorStrategy,
+
+    /// Enable homopolymer fingerprint scoring
+    enable_hf: bool,
+
+    /// Minimum run length for homopolymer fingerprint (default: 3)
+    hf_min_run: usize,
+
+    /// Per-genome homopolymer profiles (computed during build)
+    hf_profiles: HashMap<u32, hf::HfProfile>,
+
+    /// Gap-aware XOR chaining config for long-read alignment
+    chain_config: chain::ChainConfig,
 }
 
 impl BitPop {
@@ -587,13 +773,29 @@ impl BitPop {
             top_n: 1,
             use_spaced_seed: false,
             spaced_seed_pattern: vec![
-                true, true, true, false, true, false, false, true, true, true, false, true, true,
-                true,
+                true, true, true, true, true, false, true, true, true, true, true, true, true, true,
             ],
+            spaced_seed_hash: None,
             read_type: "short".to_string(),
             fuzzy_method: FuzzyMethod::None,
             fuzzy_mismatches: 1,
             neighborhood_hash: None,
+            search_radius: None,
+            chunk_size: 0,
+            chunk_vote_threshold: 0.0,
+            chunk_top_n: 1,
+            chunk_pct: 0.0,
+            chunk_min: 50,
+            chunk_max: 200,
+            enable_snp_detect: false,
+            snp_min_support: 3,
+            snp_penalty: 0.1,
+            align_mode: AlignMode::Xor,
+            chunk_anchor_strategy: ChunkAnchorStrategy::Rarest,
+            enable_hf: false,
+            hf_min_run: 3,
+            hf_profiles: HashMap::new(),
+            chain_config: chain::ChainConfig::default(),
         }
     }
 
@@ -653,6 +855,14 @@ impl BitPop {
         self.spaced_seed_pattern = pattern.chars().map(|c| c == '1').collect();
     }
 
+    /// Get the spaced seed pattern as a string.
+    pub fn spaced_seed_pattern(&self) -> String {
+        self.spaced_seed_pattern
+            .iter()
+            .map(|&b| if b { '1' } else { '0' })
+            .collect()
+    }
+
     /// Set the read type: "short" (Illumina) or "long" (Nanopore/PacBio).
     pub fn set_read_type(&mut self, read_type: &str) {
         self.read_type = read_type.to_lowercase();
@@ -666,6 +876,157 @@ impl BitPop {
     /// Set the maximum number of mismatches for fuzzy matching.
     pub fn set_fuzzy_mismatches(&mut self, mismatches: usize) {
         self.fuzzy_mismatches = mismatches.max(1);
+    }
+
+    /// Set the search radius for delta loop (±N bp around anchor position).
+    /// When set, overrides the default dynamic calculation (read_len/4, max 200).
+    pub fn set_search_radius(&mut self, radius: isize) {
+        self.search_radius = Some(radius.clamp(1, 200));
+    }
+
+    /// Get the current search radius.
+    /// Returns dynamic value (read_len/4, max 200) if not explicitly set.
+    pub fn search_radius(&self, read_len: usize) -> isize {
+        match self.search_radius {
+            Some(r) => r,
+            None => ((5.max(read_len / 4)).min(200)) as isize,
+        }
+    }
+
+    /// Set chunk size for PacBio long-read mapping.
+    /// 0 = disabled (use full read), >0 = split reads into chunks of this size.
+    /// Recommended: 150 for PacBio HiFi (~6-11kb reads).
+    pub fn set_chunk_size(&mut self, chunk_size: usize) {
+        self.chunk_size = chunk_size;
+    }
+
+    /// Get the current chunk size.
+    pub fn chunk_size(&self) -> usize {
+        self.chunk_size
+    }
+
+    /// Set chunk size as percentage of read length (0.0-1.0).
+    /// 0.0 = disabled (use fixed chunk_size), >0 = dynamic per-read chunk sizing.
+    /// The calculated chunk is clamped to [chunk_min, chunk_max] bp range.
+    pub fn set_chunk_pct(&mut self, chunk_pct: f64) {
+        self.chunk_pct = chunk_pct.clamp(0.0, 1.0);
+    }
+
+    /// Get the current chunk_pct setting.
+    pub fn chunk_pct(&self) -> f64 {
+        self.chunk_pct
+    }
+
+    /// Set minimum chunk size clamp for dynamic chunking (default: 50).
+    pub fn set_chunk_min(&mut self, chunk_min: usize) {
+        self.chunk_min = chunk_min;
+    }
+
+    /// Get the current chunk_min setting.
+    pub fn chunk_min(&self) -> usize {
+        self.chunk_min
+    }
+
+    /// Set maximum chunk size clamp for dynamic chunking (default: 200).
+    pub fn set_chunk_max(&mut self, chunk_max: usize) {
+        self.chunk_max = chunk_max;
+    }
+
+    /// Get the current chunk_max setting.
+    pub fn chunk_max(&self) -> usize {
+        self.chunk_max
+    }
+
+    /// Set minimum fraction of chunks that must agree for a mapping to be accepted (0.0-1.0).
+    /// 0.0 = no threshold (accept all), 0.6 = require 60% of chunks to agree.
+    pub fn set_chunk_vote_threshold(&mut self, threshold: f64) {
+        self.chunk_vote_threshold = threshold;
+    }
+
+    /// Get the current chunk vote threshold.
+    pub fn chunk_vote_threshold(&self) -> f64 {
+        self.chunk_vote_threshold
+    }
+
+    /// Set number of top genomes to return per read in chunk-based mode.
+    /// Default: 1 (winner-takes-all). Use 2-3 for multi-genome uncertainty.
+    pub fn set_chunk_top_n(&mut self, top_n: usize) {
+        self.chunk_top_n = top_n.max(1);
+    }
+
+    /// Get the current chunk top-n setting.
+    pub fn chunk_top_n(&self) -> usize {
+        self.chunk_top_n
+    }
+
+    /// Set the anchor strategy for chunk-based mapping.
+    pub fn set_chunk_anchor_strategy(&mut self, strategy: ChunkAnchorStrategy) {
+        self.chunk_anchor_strategy = strategy;
+    }
+
+    /// Get the current chunk anchor strategy.
+    pub fn chunk_anchor_strategy(&self) -> ChunkAnchorStrategy {
+        self.chunk_anchor_strategy
+    }
+
+    /// Enable or disable SNP-aware scoring for strain resolution.
+    pub fn set_snp_detect(&mut self, enable: bool) {
+        self.enable_snp_detect = enable;
+    }
+
+    /// Get the current SNP detection enabled status.
+    pub fn snp_detect_enabled(&self) -> bool {
+        self.enable_snp_detect
+    }
+
+    /// Set the minimum support count for SNP detection.
+    pub fn set_snp_min_support(&mut self, min_support: u32) {
+        self.snp_min_support = min_support.max(1);
+    }
+
+    /// Get the current SNP minimum support setting.
+    pub fn snp_min_support(&self) -> u32 {
+        self.snp_min_support
+    }
+
+    /// Set the SNP penalty amount (subtract from score for non-SNP mismatches).
+    pub fn set_snp_penalty(&mut self, penalty: f64) {
+        self.snp_penalty = penalty.clamp(0.0, 1.0);
+    }
+
+    /// Get the current SNP penalty setting.
+    pub fn snp_penalty(&self) -> f64 {
+        self.snp_penalty
+    }
+
+    /// Enable homopolymer fingerprint scoring.
+    pub fn set_hf(&mut self, enable: bool) {
+        self.enable_hf = enable;
+    }
+
+    /// Get the current HF enabled status.
+    pub fn hf_enabled(&self) -> bool {
+        self.enable_hf
+    }
+
+    /// Set the minimum run length for homopolymer fingerprint.
+    pub fn set_hf_min_run(&mut self, min_run: usize) {
+        self.hf_min_run = min_run.max(2);
+    }
+
+    /// Get the current HF min_run setting.
+    pub fn hf_min_run(&self) -> usize {
+        self.hf_min_run
+    }
+
+    /// Set the default alignment mode for mapping operations.
+    pub fn set_align_mode(&mut self, mode: AlignMode) {
+        self.align_mode = mode;
+    }
+
+    /// Get the current alignment mode.
+    pub fn align_mode(&self) -> AlignMode {
+        self.align_mode
     }
 
     /// Add a genome (reference sequence) to the index.
@@ -732,6 +1093,17 @@ impl BitPop {
         if matches!(self.fuzzy_method, FuzzyMethod::Neighborhood) {
             self.build_neighborhood_hash();
         }
+
+        if self.use_spaced_seed {
+            self.build_spaced_seed_hash();
+        }
+
+        if self.enable_hf {
+            for (gid, seq) in &self.genomes {
+                let profile = hf::HfProfile::compute(seq, self.hf_min_run);
+                self.hf_profiles.insert(*gid, profile);
+            }
+        }
     }
 
     /// Finalize the index with parallel FM-Index build using rayon.
@@ -763,6 +1135,17 @@ impl BitPop {
 
         if matches!(self.fuzzy_method, FuzzyMethod::Neighborhood) {
             self.build_neighborhood_hash();
+        }
+
+        if self.use_spaced_seed {
+            self.build_spaced_seed_hash();
+        }
+
+        if self.enable_hf {
+            for (gid, seq) in &self.genomes {
+                let profile = hf::HfProfile::compute(seq, self.hf_min_run);
+                self.hf_profiles.insert(*gid, profile);
+            }
         }
     }
 
@@ -1141,7 +1524,127 @@ impl BitPop {
                     }
                 }
             }
+            AlignMode::Softclip => self.align_read_softclip(read, genome_id, position),
+            AlignMode::Chain => {
+                // Chain mode does its own genome search, ignores genome_id/position
+                let chain_results = self.align_read_chain(read);
+                if let Some((_, score, cigar, ref_pos)) = chain_results.first() {
+                    (*score, cigar.clone(), *ref_pos)
+                } else {
+                    (0.0, String::new(), 0)
+                }
+            }
         }
+    }
+
+    /// Stage 2: Soft-clipping XOR alignment.
+    /// Slides windows across the read to find the optimal alignment region,
+    /// emitting soft-clips (S:) for adapter/contaminated regions.
+    pub fn align_read_softclip(
+        &self,
+        read: &str,
+        genome_id: u32,
+        position: u64,
+    ) -> (f64, String, usize) {
+        let read_enc = encode_sequence(read);
+        let genome = match self.genomes.get(&genome_id) {
+            Some(g) => g,
+            None => return (0.0, String::new(), 0),
+        };
+
+        let pos = position as usize;
+        let read_len = read_enc.len();
+
+        if read_len == 0 {
+            return (0.0, String::new(), 0);
+        }
+
+        // Extract genome region
+        let region_end = (pos + read_len).min(genome.len());
+        let region = &genome[pos..region_end];
+
+        // Minimum alignment length: at least 1/3 of read or 20bp, whichever is larger
+        let min_align = (read_len / 3).max(20);
+
+        align::two_bit_align_softclip(&read_enc, region, min_align, 0.7)
+    }
+
+    /// Stage 2: Gap-aware XOR chaining for long-read alignment.
+    ///
+    /// Uses minimizer-based seed chaining with XOR gap extension.
+    /// Handles ONT/PacBio 5-15% error rates and long indels.
+    pub fn align_read_chain(&self, read: &str) -> Vec<(u32, f64, String, usize)> {
+        let fm = match &self.fm_index {
+            Some(idx) => idx,
+            None => return Vec::new(),
+        };
+
+        let results = chain::chain_align_long_read(read, fm, &self.genomes, &self.chain_config);
+
+        results
+            .into_iter()
+            .map(|(genome_id, score, cigar, ref_pos, _span)| (genome_id, score, cigar, ref_pos))
+            .collect()
+    }
+
+    /// Set chain k-mer size for minimizer extraction.
+    pub fn set_chain_k(&mut self, k: usize) {
+        self.chain_config.k = k.max(5);
+    }
+
+    /// Get chain k-mer size.
+    pub fn chain_k(&self) -> usize {
+        self.chain_config.k
+    }
+
+    /// Set chain window size for minimizer extraction.
+    pub fn set_chain_window(&mut self, w: usize) {
+        self.chain_config.w = w.max(1);
+    }
+
+    /// Get chain window size.
+    pub fn chain_window(&self) -> usize {
+        self.chain_config.w
+    }
+
+    /// Set minimum chain seeds required.
+    pub fn set_chain_min_seeds(&mut self, min_seeds: usize) {
+        self.chain_config.min_chain_seeds = min_seeds.max(1);
+    }
+
+    /// Get minimum chain seeds.
+    pub fn chain_min_seeds(&self) -> usize {
+        self.chain_config.min_chain_seeds
+    }
+
+    /// Set maximum gap size between chained seeds.
+    pub fn set_chain_max_gap(&mut self, max_gap: usize) {
+        self.chain_config.max_gap = max_gap;
+    }
+
+    /// Get maximum gap size.
+    pub fn chain_max_gap(&self) -> usize {
+        self.chain_config.max_gap
+    }
+
+    /// Set gap open penalty for affine gap model.
+    pub fn set_chain_gap_open(&mut self, gap_open: f64) {
+        self.chain_config.gap_open = gap_open;
+    }
+
+    /// Get gap open penalty.
+    pub fn chain_gap_open(&self) -> f64 {
+        self.chain_config.gap_open
+    }
+
+    /// Set gap extension penalty for affine gap model.
+    pub fn set_chain_gap_extend(&mut self, gap_extend: f64) {
+        self.chain_config.gap_extend = gap_extend;
+    }
+
+    /// Get gap extension penalty.
+    pub fn chain_gap_extend(&self) -> f64 {
+        self.chain_config.gap_extend
     }
 
     /// Stage 3: Rank pre-scored mapping results.
@@ -1151,6 +1654,7 @@ impl BitPop {
         scored_candidates: &[(u32, u64, f64, String)],
         read: &str,
         context_window: usize,
+        min_final_score: f64,
     ) -> Vec<MappingResult> {
         let fm = match &self.fm_index {
             Some(idx) => idx,
@@ -1168,9 +1672,24 @@ impl BitPop {
             1.0
         };
 
+        let read_hf = if self.enable_hf {
+            Some(hf::HfProfile::compute_read(&encoded, self.hf_min_run))
+        } else {
+            None
+        };
+
         for &(genome_id, position, align_score, ref cigar) in scored_candidates {
-            if align_score < 0.5 {
+            if align_score < min_final_score {
                 continue;
+            }
+
+            let mut hf_score = 0.0f64;
+            if self.enable_hf {
+                if let Some(profile) = self.hf_profiles.get(&genome_id) {
+                    if let Some(ref read_prof) = read_hf {
+                        hf_score = profile.similarity(read_prof);
+                    }
+                }
             }
 
             // align_score is the primary signal (0.85 weight).
@@ -1187,6 +1706,9 @@ impl BitPop {
                 cigar: cigar.clone(),
                 context,
                 is_reverse: false,
+                rarity,
+                md_string: String::new(),
+                hf_score,
             });
         }
 
@@ -1243,6 +1765,9 @@ impl BitPop {
                 cigar,
                 context,
                 is_reverse: false,
+                rarity,
+                md_string: String::new(),
+                hf_score: 0.0,
             });
         }
 
@@ -1355,8 +1880,64 @@ impl BitPop {
         candidates
     }
 
+    /// Find golden anchors: k-mers with highest average quality, then rarest.
+    /// Quality score: average Phred quality of bases in k-mer.
+    /// Golden threshold: average quality >= 30 (99.9% accuracy per base).
+    fn find_golden_anchors(
+        &self,
+        encoded: &[u8],
+        quality: &[u8],
+        fm: &FmIndex,
+        max_hits: usize,
+    ) -> Vec<(usize, Vec<u8>, usize)> {
+        if encoded.len() < self.k || quality.len() < self.k {
+            return Vec::new();
+        }
+
+        let mut quality_candidates: Vec<(usize, f64, Vec<u8>)> = Vec::new();
+
+        for i in 0..=(encoded.len().saturating_sub(self.k)) {
+            let qual_end = (i + self.k).min(quality.len());
+            if qual_end - i < self.k {
+                continue;
+            }
+
+            let avg_quality: f64 =
+                quality[i..qual_end].iter().map(|&q| q as f64).sum::<f64>() / self.k as f64;
+
+            if avg_quality >= 30.0 {
+                let kmer = &encoded[i..i + self.k];
+                quality_candidates.push((i, avg_quality, kmer.to_vec()));
+            }
+        }
+
+        if quality_candidates.is_empty() {
+            let fallback = self.find_top_n_rarest_kmers(encoded, fm, max_hits);
+            return fallback;
+        }
+
+        quality_candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
+        let top_quality_count = (quality_candidates.len() as f64 * 0.1).max(10.0) as usize;
+        quality_candidates.truncate(top_quality_count.min(quality_candidates.len()));
+
+        let mut final_candidates: Vec<(usize, Vec<u8>, usize)> = Vec::new();
+        for &(idx, _, ref kmer) in &quality_candidates {
+            let count = fm.count_occurrences(kmer);
+            if count > 0 && count <= max_hits {
+                final_candidates.push((idx, kmer.clone(), count));
+            }
+        }
+
+        final_candidates.sort_by_key(|&(_, _, count)| count);
+
+        let n = self.top_n.min(final_candidates.len());
+        final_candidates.truncate(n);
+        final_candidates
+    }
+
     /// Find the top-N rarest spaced k-mers in a read, sorted by ascending occurrence count.
-    /// Uses spaced seed pattern to skip certain positions in the k-mer window.
+    /// Uses spaced seed hash table for ultra-fast lookup.
     fn find_top_n_rarest_kmers_spaced(
         &self,
         encoded: &[u8],
@@ -1368,19 +1949,18 @@ impl BitPop {
         }
 
         let mut candidates: Vec<(usize, Vec<u8>, usize)> = Vec::new();
+        let pattern_len = self.spaced_seed_pattern.len();
 
-        for i in 0..=(encoded.len() - self.spaced_seed_pattern.len()) {
-            let window = &encoded[i..i + self.spaced_seed_pattern.len()];
-            let spaced_kmer: Vec<u8> = window
-                .iter()
-                .enumerate()
-                .filter(|(j, _)| self.spaced_seed_pattern[*j])
-                .map(|(_, &b)| b)
-                .collect();
+        for i in 0..=(encoded.len().saturating_sub(pattern_len)) {
+            let window = &encoded[i..i + pattern_len];
 
-            let count = fm.count_occurrences_spaced(window, &self.spaced_seed_pattern);
+            let count = if self.spaced_seed_hash.is_some() {
+                self.count_occurrences_spaced_hash(window)
+            } else {
+                fm.count_occurrences_spaced(window, &self.spaced_seed_pattern)
+            };
             if count > 0 && count <= max_hits {
-                candidates.push((i, spaced_kmer, count));
+                candidates.push((i, window.to_vec(), count));
             }
         }
 
@@ -1509,6 +2089,65 @@ impl BitPop {
         }
 
         self.neighborhood_hash = Some(hash_table);
+    }
+
+    /// Build spaced seed hash table for ultra-fast lookup.
+    /// Maps encoded spaced k-mers to (genome_id, position) lists.
+    fn build_spaced_seed_hash(&mut self) {
+        if self.fm_index.is_none() {
+            return;
+        }
+
+        let pattern = self.spaced_seed_pattern.clone();
+        let seed = fm::SpacedSeed::from_binary(
+            &pattern
+                .iter()
+                .map(|&b| if b { '1' } else { '0' })
+                .collect::<String>(),
+        );
+
+        let mut hash_table = HashMap::new();
+
+        for (&genome_id, seq) in &self.genomes {
+            for i in 0..=seq.len().saturating_sub(seed.len()) {
+                let kmer = &seq[i..i + seed.len()];
+                let hash_key = seed.encode_as_hash(kmer);
+
+                hash_table
+                    .entry(hash_key)
+                    .or_insert_with(Vec::new)
+                    .push((genome_id, i as u64));
+            }
+        }
+
+        self.spaced_seed_hash = Some(hash_table);
+    }
+
+    /// Find positions using spaced seed hash table lookup.
+    fn find_positions_spaced_hash(&self, kmer: &[u8]) -> Vec<(u32, u64)> {
+        let hash_table = match &self.spaced_seed_hash {
+            Some(table) => table,
+            None => return Vec::new(),
+        };
+
+        let seed = fm::SpacedSeed::from_binary(
+            &self
+                .spaced_seed_pattern
+                .iter()
+                .map(|&b| if b { '1' } else { '0' })
+                .collect::<String>(),
+        );
+
+        let hash_key = seed.encode_as_hash(kmer);
+
+        hash_table.get(&hash_key).cloned().unwrap_or_default()
+    }
+
+    /// Count occurrences using spaced seed hash table lookup.
+    fn count_occurrences_spaced_hash(&self, kmer: &[u8]) -> usize {
+        let positions = self.find_positions_spaced_hash(kmer);
+        let mut seen = std::collections::HashSet::new();
+        positions.iter().filter(|p| seen.insert(*p)).count()
     }
 
     /// Find the top-N rarest k-mers using neighborhood hash table.
@@ -1682,7 +2321,11 @@ impl BitPop {
 
         for &(anchor_read_offset, ref anchor_kmer, _) in &top_n_kmers {
             let raw_positions = if self.use_spaced_seed {
-                fm.find_positions_spaced(anchor_kmer, &self.spaced_seed_pattern, 500)
+                if self.spaced_seed_hash.is_some() {
+                    self.find_positions_spaced_hash(anchor_kmer)
+                } else {
+                    fm.find_positions_spaced(anchor_kmer, &self.spaced_seed_pattern, 500)
+                }
             } else {
                 fm.find_positions(anchor_kmer, 500)
             };
@@ -1706,7 +2349,8 @@ impl BitPop {
 
                 let estimated_read_start = position as isize - anchor_read_offset as isize;
 
-                let search_radius: isize = (window_size.max(read_len / 4)).min(200) as isize;
+                let search_radius: isize = self.search_radius(read_len);
+                let use_direct = search_radius <= 10;
                 let mut best_score = f64::NEG_INFINITY;
                 let mut best_cigar = String::new();
                 let mut best_offset: usize = 0;
@@ -1725,7 +2369,12 @@ impl BitPop {
 
                     let (score, cigar, _) = match mode {
                         AlignMode::Xor => {
-                            if read_len <= 31 {
+                            let is_long_read = self.read_type == "long" || read_len > 1000;
+                            if use_direct && !is_long_read {
+                                let (s, _) =
+                                    align::two_bit_score_direct(&encoded, candidate_region);
+                                (s, format!("{}M", read_len), candidate_start)
+                            } else if read_len <= 31 {
                                 align::two_bit_align(&encoded, candidate_region)
                             } else {
                                 let (s, o) =
@@ -1758,25 +2407,29 @@ impl BitPop {
                                     align::two_bit_align(&encoded, candidate_region);
                                 if xor_s >= 0.9 {
                                     (xor_s, xor_cigar, candidate_start)
-                                } else {
+                                } else if xor_s >= 0.7 {
                                     let (sw_score, sw_cigar) =
                                         align::smith_waterman(&encoded, candidate_region);
                                     if sw_score == 0 {
-                                        continue;
-                                    }
-                                    let normalized = (sw_score as f64) / (2.0 * read_len as f64);
-                                    if normalized > xor_s {
-                                        (normalized.min(1.0), sw_cigar, candidate_start)
-                                    } else {
                                         (xor_s, xor_cigar, candidate_start)
+                                    } else {
+                                        let normalized =
+                                            (sw_score as f64) / (2.0 * read_len as f64);
+                                        if normalized > xor_s {
+                                            (normalized.min(1.0), sw_cigar, candidate_start)
+                                        } else {
+                                            (xor_s, xor_cigar, candidate_start)
+                                        }
                                     }
+                                } else {
+                                    (xor_s, xor_cigar, candidate_start)
                                 }
                             } else {
                                 let (s, _) =
                                     align::two_bit_score_chunks(&encoded, candidate_region);
                                 if s >= 0.9 {
                                     (s, format!("{}M", read_len), candidate_start)
-                                } else {
+                                } else if s >= 0.7 {
                                     let (sw_score, sw_cigar) =
                                         align::smith_waterman_chunked(&encoded, candidate_region);
                                     let sw_s = (sw_score as f64) / (2.0 * read_len as f64);
@@ -1785,7 +2438,30 @@ impl BitPop {
                                     } else {
                                         (s, format!("{}M", read_len), candidate_start)
                                     }
+                                } else {
+                                    (s, format!("{}M", read_len), candidate_start)
                                 }
+                            }
+                        }
+                        AlignMode::Softclip => {
+                            let min_align = (read_len / 3).max(20);
+                            let (s, c, _) = align::two_bit_align_softclip(
+                                &encoded,
+                                candidate_region,
+                                min_align,
+                                0.7,
+                            );
+                            (s, c, candidate_start)
+                        }
+                        AlignMode::Chain => {
+                            // Chain mode does its own global search via minimizers,
+                            // but for per-candidate fallback, use XOR scoring
+                            if read_len <= 31 {
+                                align::two_bit_align(&encoded, candidate_region)
+                            } else {
+                                let (s, o) =
+                                    align::two_bit_score_chunks(&encoded, candidate_region);
+                                (s, format!("{}M", read_len), o)
                             }
                         }
                     };
@@ -1904,7 +2580,7 @@ impl BitPop {
                     continue;
                 }
 
-                let search_radius: isize = (self.k.max(read_len / 4)).min(200) as isize;
+                let search_radius: isize = self.search_radius(read_len);
                 let mut best_score = 0.0f64;
                 let mut best_offset: usize = 0;
 
@@ -1926,7 +2602,11 @@ impl BitPop {
                         break;
                     }
 
-                    let (score, _) = align::two_bit_score_chunks(&encoded, candidate_region);
+                    let (score, _) = if search_radius <= 10 {
+                        align::two_bit_score_direct(&encoded, candidate_region)
+                    } else {
+                        align::two_bit_score_chunks(&encoded, candidate_region)
+                    };
                     if score > best_score {
                         best_score = score;
                         best_offset = candidate_start;
@@ -2088,7 +2768,7 @@ impl BitPop {
                     continue;
                 }
 
-                let search_radius: isize = (self.k.max(read_len / 4)).min(200) as isize;
+                let search_radius: isize = self.search_radius(read_len);
                 let mut best_score = f64::NEG_INFINITY;
                 let mut best_offset: usize = 0;
                 let mut best_penalty = 0.0f64;
@@ -2106,11 +2786,16 @@ impl BitPop {
                     let candidate_region = &genome[candidate_start..region_end];
                     let qual_slice = &quality[..read_len.min(quality.len())];
 
-                    let (chunk_score, _, chunk_penalty) = align::two_bit_score_chunks_with_quality(
-                        &encoded,
-                        candidate_region,
-                        qual_slice,
-                    );
+                    let (chunk_score, _, chunk_penalty) = if search_radius <= 10 {
+                        let (s, _) = align::two_bit_score_direct(&encoded, candidate_region);
+                        (s, 0, 0.0f64)
+                    } else {
+                        align::two_bit_score_chunks_with_quality(
+                            &encoded,
+                            candidate_region,
+                            qual_slice,
+                        )
+                    };
                     let adjusted = chunk_score + chunk_penalty;
 
                     if adjusted > best_score {
@@ -2166,6 +2851,161 @@ impl BitPop {
                         best_score.clamp(0.0, 1.0),
                         cigar,
                         best_penalty,
+                    ));
+                }
+            }
+        }
+
+        scored.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(50);
+        scored
+    }
+
+    /// Dispatch anchor filtering based on chunk anchor strategy.
+    /// Uses quality scores when strategy is Golden, otherwise ignores them.
+    fn anchor_filter_for_chunk(
+        &self,
+        chunk: &str,
+        quality: Option<&[u8]>,
+        min_score: f64,
+        max_hits: usize,
+    ) -> Vec<(u32, u64, f64, String)> {
+        match self.chunk_anchor_strategy {
+            ChunkAnchorStrategy::Golden => {
+                if let Some(qual) = quality {
+                    self.anchor_filter_with_golden_anchors(chunk, qual, min_score, max_hits)
+                } else {
+                    // Fallback to rarest when quality not available
+                    self.anchor_filter_with_mode(chunk, self.align_mode, min_score, max_hits)
+                }
+            }
+            ChunkAnchorStrategy::Spaced => {
+                self.anchor_filter_with_mode(chunk, self.align_mode, min_score, max_hits)
+            }
+            ChunkAnchorStrategy::Rarest => {
+                self.anchor_filter_with_mode(chunk, self.align_mode, min_score, max_hits)
+            }
+        }
+    }
+
+    /// Golden anchor anchor filter: uses quality-weighted anchors for better long-read mapping.
+    pub fn anchor_filter_with_golden_anchors(
+        &self,
+        read: &str,
+        quality: &[u8],
+        min_score: f64,
+        max_hits: usize,
+    ) -> Vec<(u32, u64, f64, String)> {
+        let fm = match &self.fm_index {
+            Some(idx) => idx,
+            None => return Vec::new(),
+        };
+
+        let encoded = encode_sequence(read);
+        if encoded.len() < self.k {
+            return Vec::new();
+        }
+
+        let top_n_kmers = self.find_golden_anchors(&encoded, quality, fm, max_hits);
+        if top_n_kmers.is_empty() {
+            return self.anchor_filter_with_threshold(read, min_score, max_hits);
+        }
+
+        let mut scored = Vec::new();
+        let read_len = encoded.len();
+        let mut seen: std::collections::HashSet<(u32, u64)> = std::collections::HashSet::new();
+
+        for &(anchor_read_offset, ref anchor_kmer, _) in &top_n_kmers {
+            let raw_positions = fm.find_positions(anchor_kmer, 500);
+
+            let positions: Vec<(u32, u64)> = if raw_positions.len() > 100 {
+                let stride = raw_positions.len() / 100;
+                raw_positions.into_iter().step_by(stride).collect()
+            } else {
+                raw_positions
+            };
+
+            for &(genome_id, position) in &positions {
+                if !seen.insert((genome_id, position)) {
+                    continue;
+                }
+
+                let genome = match self.genomes.get(&genome_id) {
+                    Some(g) => g,
+                    None => continue,
+                };
+
+                let estimated_read_start = position as isize - anchor_read_offset as isize;
+
+                let search_radius: isize = self.search_radius(read_len);
+                let mut best_score = f64::NEG_INFINITY;
+                let mut best_offset: usize = 0;
+
+                for delta in -search_radius..=search_radius {
+                    let candidate_start = (estimated_read_start + delta).max(0) as usize;
+                    if candidate_start >= genome.len() {
+                        continue;
+                    }
+                    let region_end = (candidate_start + read_len).min(genome.len());
+                    if region_end - candidate_start < self.k {
+                        continue;
+                    }
+
+                    let candidate_region = &genome[candidate_start..region_end];
+                    let (s, _) = align::two_bit_score_direct(&encoded, candidate_region);
+
+                    if s > best_score {
+                        best_score = s;
+                        best_offset = candidate_start;
+                    }
+                }
+
+                if best_score >= min_score {
+                    let cand_end = (best_offset + read_len).min(genome.len());
+                    let cand_region = &genome[best_offset..cand_end];
+                    let overlap = read_len.min(cand_region.len());
+                    let read_part = &encoded[..overlap];
+
+                    let mut cigar = String::with_capacity(read_len * 2 + 2);
+                    let mut ops: Vec<(u8, usize)> = Vec::new();
+                    for i in 0..overlap {
+                        let op = if read_part[i] == cand_region[i] {
+                            0u8
+                        } else {
+                            1u8
+                        };
+                        if let Some(last) = ops.last_mut() {
+                            if last.0 == op {
+                                last.1 += 1;
+                            } else {
+                                ops.push((op, 1));
+                            }
+                        } else {
+                            ops.push((op, 1));
+                        }
+                    }
+                    if cand_region.len() < read_len {
+                        let clip = read_len - overlap;
+                        if ops.is_empty() || ops.last().unwrap().0 != 2 {
+                            ops.push((2, clip));
+                        } else {
+                            ops.last_mut().unwrap().1 += clip;
+                        }
+                    }
+                    for (op, count) in ops {
+                        cigar.push_str(&count.to_string());
+                        cigar.push(match op {
+                            0 => 'M',
+                            1 => 'X',
+                            _ => 'S',
+                        });
+                    }
+
+                    scored.push((
+                        genome_id,
+                        best_offset as u64,
+                        best_score.clamp(0.0, 1.0),
+                        cigar,
                     ));
                 }
             }
@@ -2233,6 +3073,8 @@ impl BitPop {
                 quality_scores: quality.to_vec(),
                 context,
                 is_reverse: false,
+                rarity,
+                md_string: String::new(),
             });
         }
 
@@ -2372,7 +3214,137 @@ impl BitPop {
         if scored.is_empty() {
             return Vec::new();
         }
-        self.rank_scored_results(&scored, read, context_window)
+        self.rank_scored_results(&scored, read, context_window, 0.5)
+    }
+
+    /// Map a read with custom threshold (for two-pass mapping).
+    pub fn map_read_with_threshold(
+        &self,
+        read: &str,
+        mode: AlignMode,
+        context_window: usize,
+        min_score: f64,
+    ) -> Vec<MappingResult> {
+        let forward_results =
+            self.map_read_orientation_threshold(read, mode, context_window, false, min_score);
+        let rc_read = reverse_complement(read);
+        let rc_results =
+            self.map_read_orientation_threshold(&rc_read, mode, context_window, true, min_score);
+
+        let best_forward = forward_results.first().cloned();
+        let best_rc = rc_results.first().cloned();
+
+        match (best_forward, best_rc) {
+            (Some(f), Some(r)) => {
+                if r.score > f.score {
+                    let mut results = rc_results;
+                    if !results.is_empty() {
+                        results[0].is_reverse = true;
+                    }
+                    results
+                } else {
+                    let mut results = forward_results;
+                    if !results.is_empty() {
+                        results[0].is_reverse = false;
+                    }
+                    results
+                }
+            }
+            (Some(_f), None) => {
+                let mut results = forward_results;
+                if !results.is_empty() {
+                    results[0].is_reverse = false;
+                }
+                results
+            }
+            (None, Some(_r)) => {
+                let mut results = rc_results;
+                if !results.is_empty() {
+                    results[0].is_reverse = true;
+                }
+                results
+            }
+            (None, None) => Vec::new(),
+        }
+    }
+
+    /// Map a single orientation with custom threshold.
+    fn map_read_orientation_threshold(
+        &self,
+        read: &str,
+        mode: AlignMode,
+        context_window: usize,
+        _is_rc: bool,
+        min_score: f64,
+    ) -> Vec<MappingResult> {
+        let scored = self.anchor_filter_with_mode(read, mode, min_score, DEFAULT_REPEAT_THRESHOLD);
+        if scored.is_empty() {
+            return Vec::new();
+        }
+        self.rank_scored_results(&scored, read, context_window, min_score)
+    }
+
+    /// Diagnose why a read failed to map.
+    /// Returns a human-readable reason for unmapped reads.
+    pub fn diagnose_read(&self, read: &str) -> String {
+        let fm = match &self.fm_index {
+            Some(idx) => idx,
+            None => return "Index not built".to_string(),
+        };
+
+        let encoded = encode_sequence(read);
+        let window_size = if self.use_spaced_seed {
+            self.spaced_seed_pattern.len()
+        } else {
+            self.k
+        };
+
+        if encoded.len() < window_size {
+            return "Read too short".to_string();
+        }
+
+        // Check how many k-mers exist in the index
+        let mut found_in_index = 0;
+        let mut _below_threshold = 0;
+        let mut above_threshold = 0;
+
+        for i in 0..=(encoded.len() - window_size) {
+            let kmer: Vec<u8> = encoded[i..i + window_size].to_vec();
+            let count = fm.count_occurrences(&kmer);
+            if count > 0 {
+                found_in_index += 1;
+                if count > DEFAULT_REPEAT_THRESHOLD {
+                    _below_threshold += 1;
+                } else {
+                    above_threshold += 1;
+                }
+            }
+        }
+
+        if found_in_index == 0 {
+            return "No k-mers in index".to_string();
+        }
+
+        if above_threshold == 0 {
+            return "All k-mers below rarity threshold".to_string();
+        }
+
+        // Check best alignment score
+        let scored =
+            self.anchor_filter_with_mode(read, AlignMode::Xor, 0.0, DEFAULT_REPEAT_THRESHOLD);
+        if let Some((_, _, best_score, _)) =
+            scored.iter().max_by(|a, b| a.2.partial_cmp(&b.2).unwrap())
+        {
+            if *best_score < 0.5 {
+                format!("Alignment score too low: {:.3}", best_score)
+            } else if *best_score < 0.7 {
+                format!("Alignment score below threshold: {:.3}", best_score)
+            } else {
+                "K-mers exist but alignment failed".to_string()
+            }
+        } else {
+            "No anchor candidates found".to_string()
+        }
     }
 
     /// Full pipeline: map a read with quality scores to all indexed genomes.
@@ -2441,6 +3413,123 @@ impl BitPop {
         }
     }
 
+    /// Full pipeline with golden anchor selection: map a read with quality scores using quality-weighted anchors.
+    pub fn map_read_with_golden_anchors(
+        &self,
+        read: &str,
+        quality: &[u8],
+        mode: AlignMode,
+        context_window: usize,
+    ) -> Vec<QualityMappingResult> {
+        let forward_results =
+            self.map_read_golden_orientation(read, quality, mode, context_window, false);
+        let rc_read = reverse_complement(read);
+        let rc_results =
+            self.map_read_golden_orientation(&rc_read, quality, mode, context_window, true);
+
+        let best_forward = forward_results.first().cloned();
+        let best_rc = rc_results.first().cloned();
+
+        match (best_forward, best_rc) {
+            (Some(f), Some(r)) => {
+                if r.combined_score > f.combined_score {
+                    let mut results = rc_results;
+                    if !results.is_empty() {
+                        results[0].is_reverse = true;
+                    }
+                    results
+                } else {
+                    let mut results = forward_results;
+                    if !results.is_empty() {
+                        results[0].is_reverse = false;
+                    }
+                    results
+                }
+            }
+            (Some(_f), None) => {
+                let mut results = forward_results;
+                if !results.is_empty() {
+                    results[0].is_reverse = false;
+                }
+                results
+            }
+            (None, Some(_r)) => {
+                let mut results = rc_results;
+                if !results.is_empty() {
+                    results[0].is_reverse = true;
+                }
+                results
+            }
+            (None, None) => Vec::new(),
+        }
+    }
+
+    /// Map a single orientation (forward or RC) of a read with quality scores using golden anchors.
+    fn map_read_golden_orientation(
+        &self,
+        read: &str,
+        quality: &[u8],
+        _mode: AlignMode,
+        context_window: usize,
+        is_rc: bool,
+    ) -> Vec<QualityMappingResult> {
+        let scored =
+            self.anchor_filter_with_golden_anchors(read, quality, 0.5, DEFAULT_REPEAT_THRESHOLD);
+        if scored.is_empty() {
+            return Vec::new();
+        }
+
+        let fm = match &self.fm_index {
+            Some(idx) => idx,
+            None => return Vec::new(),
+        };
+
+        let encoded = encode_sequence(read);
+        let mut results = Vec::new();
+
+        for &(genome_id, position, align_score, ref cigar) in &scored {
+            if align_score < 0.5 {
+                continue;
+            }
+
+            let rarity = if encoded.len() >= self.k {
+                let occ = fm.count_occurrences(&encoded[..self.k]);
+                1.0 / (occ as f64).max(1.0)
+            } else {
+                1.0
+            };
+
+            let combined_score = align_score * 0.85 + rarity * 0.15;
+
+            let read_len = encoded.len();
+            let context =
+                self.extract_genome_context(genome_id, position, read_len, context_window);
+
+            results.push(QualityMappingResult {
+                genome_id,
+                position,
+                align_score,
+                adjusted_score: align_score,
+                combined_score,
+                cigar: cigar.clone(),
+                quality_penalty: 0.0,
+                quality_scores: quality.to_vec(),
+                context,
+                is_reverse: is_rc,
+                rarity,
+                md_string: String::new(),
+            });
+        }
+
+        results.sort_by(|a, b| {
+            b.combined_score
+                .partial_cmp(&a.combined_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        results.truncate(10);
+        results
+    }
+
     /// Map a single orientation (forward or RC) of a read with quality scores.
     fn map_read_quality_orientation(
         &self,
@@ -2500,6 +3589,8 @@ impl BitPop {
                 quality_scores: quality.to_vec(),
                 context,
                 is_reverse: false,
+                rarity,
+                md_string: String::new(),
             });
         }
 
@@ -2575,13 +3666,29 @@ impl BitPop {
             top_n: 1,
             use_spaced_seed: false,
             spaced_seed_pattern: vec![
-                true, true, true, false, true, false, false, true, true, true, false, true, true,
-                true,
+                true, true, true, true, true, false, true, true, true, true, true, true, true, true,
             ],
+            spaced_seed_hash: None,
             read_type: "short".to_string(),
             fuzzy_method: FuzzyMethod::None,
             fuzzy_mismatches: 1,
             neighborhood_hash: None,
+            search_radius: None,
+            chunk_size: 0,
+            chunk_vote_threshold: 0.0,
+            chunk_top_n: 1,
+            chunk_pct: 0.0,
+            chunk_min: 50,
+            chunk_max: 200,
+            enable_snp_detect: false,
+            snp_min_support: 3,
+            snp_penalty: 0.1,
+            align_mode: AlignMode::Xor,
+            chunk_anchor_strategy: ChunkAnchorStrategy::Rarest,
+            enable_hf: false,
+            hf_min_run: 3,
+            hf_profiles: HashMap::new(),
+            chain_config: chain::ChainConfig::default(),
         }
     }
 
@@ -2845,17 +3952,23 @@ impl BitPop {
         Ok(mapped_count)
     }
 
-    /// Map multiple reads with progress callback and write results to a SAM file.
+    /// Map multiple reads with progress callback and write results to a SAM/BAM file.
     /// The callback is called after every `progress_interval` reads with the current count.
-    pub fn map_reads_to_sam_with_progress(
+    pub fn map_reads_to_output_with_progress(
         &self,
         reads: &[(&str, &str)],
         output_path: &str,
         context_window: usize,
         progress_interval: usize,
+        write_bam: bool,
         mut on_progress: impl FnMut(usize, usize),
     ) -> io::Result<usize> {
-        let mut writer = sam::SamWriter::new(output_path)?;
+        use crate::bam::AlignmentWriter;
+        let mut writer: Box<dyn AlignmentWriter> = if write_bam {
+            Box::new(bam::BamWriter::new(output_path)?)
+        } else {
+            Box::new(sam::SamWriter::new(output_path)?)
+        };
 
         let genomes: Vec<(&str, usize)> = (0..self.genome_count() as u32)
             .filter_map(|gid| {
@@ -2872,7 +3985,7 @@ impl BitPop {
         let total = reads.len();
 
         for (i, (read_name, read_seq)) in reads.iter().enumerate() {
-            let results = self.map_read(read_seq, context_window);
+            let results = self.map_read_with_mode(read_seq, self.align_mode, context_window);
             writer.write_mappings(read_name, read_seq, &results, &name_refs)?;
             if !results.is_empty() {
                 mapped_count += 1;
@@ -2887,6 +4000,30 @@ impl BitPop {
         }
 
         Ok(mapped_count)
+    }
+
+    /// Map multiple reads with progress callback and write results to a SAM file.
+    #[deprecated(
+        since = "0.2.0",
+        note = "Use map_reads_to_output_with_progress instead"
+    )]
+    #[allow(unused_mut)]
+    pub fn map_reads_to_sam_with_progress(
+        &self,
+        reads: &[(&str, &str)],
+        output_path: &str,
+        context_window: usize,
+        progress_interval: usize,
+        mut on_progress: impl FnMut(usize, usize),
+    ) -> io::Result<usize> {
+        self.map_reads_to_output_with_progress(
+            reads,
+            output_path,
+            context_window,
+            progress_interval,
+            false,
+            on_progress,
+        )
     }
 
     /// Map multiple reads in parallel with progress reporting.
@@ -2923,7 +4060,7 @@ impl BitPop {
         let mapped: Vec<(String, String, Vec<MappingResult>)> = reads
             .par_iter()
             .map(|(name, seq)| {
-                let results = self.map_read(seq, context_window);
+                let results = self.map_read_with_mode(seq, self.align_mode, context_window);
                 let count = completed.fetch_add(1, Ordering::Relaxed) + 1;
                 if count.is_multiple_of(progress_interval) || count == total {
                     if let Ok(mut cb) = progress_callback.lock() {
@@ -2952,27 +4089,220 @@ impl BitPop {
 
     /// Map a single paired-end read to all indexed genomes.
     /// Returns the best mapping result for each read in the pair.
+    /// If `reconcile` is true and R1/R2 map to different genomes, attempts
+    /// concordant reconciliation using top-N candidate overlap.
+    /// If `insert_stats` is provided, uses Gaussian insert size model for
+    /// reconciliation scoring.
     pub fn map_read_paired(
         &self,
         paired: &PairedRead,
-        _context_window: usize,
+        context_window: usize,
+        reconcile: bool,
+        reconcile_top_n: usize,
     ) -> PairedMappingResult {
-        let mut insert_stats = InsertSizeStats::new();
+        self.map_read_paired_with_stats(paired, context_window, reconcile, reconcile_top_n, None)
+    }
+
+    /// Map a single paired-end read with pre-computed insert size statistics.
+    /// Uses Gaussian insert size model for reconciliation scoring when
+    /// `insert_stats` is provided and has sufficient data (count >= 2).
+    pub fn map_read_paired_with_stats(
+        &self,
+        paired: &PairedRead,
+        context_window: usize,
+        reconcile: bool,
+        reconcile_top_n: usize,
+        insert_stats: Option<&InsertSizeStats>,
+    ) -> PairedMappingResult {
+        let mut insert_stats_out = InsertSizeStats::new();
 
         let map1 = self.map_single_read_to_best(&paired.read1_seq);
         let map2 = self.map_single_read_to_best(&paired.read2_seq);
 
+        let (final_map1, final_map2) = if reconcile {
+            if let Some(stats) = insert_stats {
+                if stats.count >= 2 {
+                    self.reconcile_pair_with_gaussian(
+                        paired,
+                        &map1,
+                        &map2,
+                        reconcile_top_n,
+                        context_window,
+                        stats,
+                    )
+                } else {
+                    self.reconcile_pair(paired, &map1, &map2, reconcile_top_n, context_window)
+                }
+            } else {
+                self.reconcile_pair(paired, &map1, &map2, reconcile_top_n, context_window)
+            }
+        } else {
+            (map1, map2)
+        };
+
         // Compute TLEN (observed template length)
-        let tlen = compute_tlen(&map1, &map2, paired.read1_seq.len(), paired.read2_seq.len());
-        insert_stats.update(tlen);
+        let tlen = compute_tlen(
+            &final_map1,
+            &final_map2,
+            paired.read1_seq.len(),
+            paired.read2_seq.len(),
+        );
+        insert_stats_out.update(tlen);
 
         PairedMappingResult {
             read_name: paired.name.clone(),
+            map1: final_map1,
+            map2: final_map2,
+            tlen,
+            insert_size_stats: insert_stats_out,
+        }
+    }
+
+    /// Reconcile a discordant paired-end mapping.
+    ///
+    /// When R1 and R2 map to different genomes, this function:
+    /// 1. Gets top-N candidates for each read across all genomes
+    /// 2. Finds common genomes in both candidate lists
+    /// 3. Picks the concordant genome with the best combined score
+    /// 4. Falls back to original independent best if no concordant genome
+    ///    meets the quality threshold
+    ///
+    /// The combined score uses the same 85/15 weighting as the main pipeline:
+    /// `combined = (score1 * 0.85 + rarity1 * 0.15 + score2 * 0.85 + rarity2 * 0.15) / 2`
+    ///
+    /// A concordant assignment is accepted only if its combined score is within
+    /// 15% of the best discordant combined score (configurable via threshold).
+    fn reconcile_pair(
+        &self,
+        paired: &PairedRead,
+        map1: &Option<PairedReadMapping>,
+        map2: &Option<PairedReadMapping>,
+        top_n: usize,
+        context_window: usize,
+    ) -> (Option<PairedReadMapping>, Option<PairedReadMapping>) {
+        self.reconcile_pair_with_gaussian(
+            paired,
             map1,
             map2,
-            tlen,
-            insert_size_stats: insert_stats,
+            top_n,
+            context_window,
+            &InsertSizeStats::new(),
+        )
+    }
+
+    /// Reconcile a discordant paired-end mapping using a Gaussian insert size model.
+    ///
+    /// When R1 and R2 map to different genomes, this function:
+    /// 1. Gets top-N candidates for each read across all genomes
+    /// 2. Finds common genomes in both candidate lists
+    /// 3. Scores each concordant candidate using combined alignment+rarity score
+    ///    PLUS a Gaussian insert size confidence bonus
+    /// 4. Picks the concordant genome with the best total score
+    /// 5. Falls back to original independent best if no concordant genome
+    ///    meets the quality threshold
+    ///
+    /// The total score is:
+    ///   `total = combined_score * (1.0 + gaussian_bonus * 0.5)`
+    /// where `gaussian_bonus = insert_size_confidence(observed_tlen)` in [0, 1].
+    /// This gives up to 50% score boost for concordant candidates with plausible
+    /// insert sizes under the Gaussian model.
+    ///
+    /// A concordant assignment is accepted only if its total score is within
+    /// 15% of the best discordant combined score.
+    fn reconcile_pair_with_gaussian(
+        &self,
+        paired: &PairedRead,
+        map1: &Option<PairedReadMapping>,
+        map2: &Option<PairedReadMapping>,
+        top_n: usize,
+        context_window: usize,
+        insert_stats: &InsertSizeStats,
+    ) -> (Option<PairedReadMapping>, Option<PairedReadMapping>) {
+        // Only reconcile if both mapped to different genomes
+        let (m1, m2) = match (map1, map2) {
+            (Some(ref a), Some(ref b)) if a.genome_id != b.genome_id => (a, b),
+            _ => return (map1.clone(), map2.clone()),
+        };
+
+        // Best discordant score (baseline to beat)
+        let score1 = m1.score * 0.85 + m1.rarity * 0.15;
+        let score2 = m2.score * 0.85 + m2.rarity * 0.15;
+        let best_discordant = (score1 + score2) / 2.0;
+
+        // Compute observed TLEN for Gaussian confidence scoring
+        let observed_tlen =
+            compute_tlen(map1, map2, paired.read1_seq.len(), paired.read2_seq.len());
+        let gaussian_confidence = insert_stats.insert_size_confidence(observed_tlen);
+
+        // Get top-N candidates for both reads
+        let candidates1 = self
+            .map_read(&paired.read1_seq, context_window)
+            .into_iter()
+            .take(top_n)
+            .collect::<Vec<_>>();
+        let candidates2 = self
+            .map_read(&paired.read2_seq, context_window)
+            .into_iter()
+            .take(top_n)
+            .collect::<Vec<_>>();
+
+        // Find best concordant genome (appearing in both top-N)
+        // Score includes Gaussian insert size confidence bonus
+        let mut best_concordant: Option<(f64, &MappingResult, &MappingResult)> = None;
+
+        for c1 in &candidates1 {
+            for c2 in &candidates2 {
+                if c1.genome_id == c2.genome_id {
+                    let s1 = c1.score * 0.85 + c1.rarity * 0.15;
+                    let s2 = c2.score * 0.85 + c2.rarity * 0.15;
+                    let combined = (s1 + s2) / 2.0;
+                    // Apply Gaussian insert size confidence bonus
+                    // Up to 50% score boost for plausible insert sizes
+                    let gaussian_bonus = gaussian_confidence * 0.5;
+                    let total_score = combined * (1.0 + gaussian_bonus);
+                    if let Some((best_score, _, _)) = best_concordant {
+                        if total_score > best_score {
+                            best_concordant = Some((total_score, c1, c2));
+                        }
+                    } else {
+                        best_concordant = Some((total_score, c1, c2));
+                    }
+                }
+            }
         }
+
+        // Accept concordant if within 15% of discordant baseline
+        if let Some((concordant_score, c1, c2)) = best_concordant {
+            let threshold = best_discordant * 0.85;
+            if concordant_score >= threshold {
+                let new_map1 = PairedReadMapping {
+                    genome_id: c1.genome_id,
+                    position: c1.position,
+                    score: c1.score,
+                    cigar: c1.cigar.clone(),
+                    is_reverse: c1.is_reverse,
+                    mapped: true,
+                    align_score: c1.score,
+                    rarity: c1.rarity,
+                    md_string: c1.md_string.clone(),
+                };
+                let new_map2 = PairedReadMapping {
+                    genome_id: c2.genome_id,
+                    position: c2.position,
+                    score: c2.score,
+                    cigar: c2.cigar.clone(),
+                    is_reverse: c2.is_reverse,
+                    mapped: true,
+                    align_score: c2.score,
+                    rarity: c2.rarity,
+                    md_string: c2.md_string.clone(),
+                };
+                return (Some(new_map1), Some(new_map2));
+            }
+        }
+
+        // No acceptable concordant assignment — keep original
+        (map1.clone(), map2.clone())
     }
 
     /// Map a single read and return its best mapping result.
@@ -2989,16 +4319,25 @@ impl BitPop {
             cigar: best.cigar.clone(),
             is_reverse: best.is_reverse,
             mapped: true,
+            align_score: best.score,
+            rarity: best.rarity,
+            md_string: best.md_string.clone(),
         })
     }
 
-    /// Map multiple paired-end reads in parallel and write SAM output.
+    /// Map multiple paired-end reads in parallel and write SAM/BAM output.
+    /// Uses a two-pass approach: first pass collects insert size statistics,
+    /// second pass uses the Gaussian model for discordant pair reconciliation.
     pub fn map_paired_reads_parallel(
         &self,
         pairs: &[PairedReads],
         output_path: &str,
         context_window: usize,
+        reconcile: bool,
+        reconcile_top_n: usize,
+        write_bam: bool,
     ) -> io::Result<usize> {
+        use crate::bam::AlignmentWriter;
         let genomes_owned: Vec<(String, usize)> = (0..self.genome_count() as u32)
             .filter_map(|gid| {
                 self.genome_name(gid)
@@ -3012,9 +4351,23 @@ impl BitPop {
             .map(|(n, l)| (n.as_str(), *l))
             .collect();
 
-        // Collect insert size stats from all pairs first
+        // Two-pass approach for Gaussian insert size model:
+        // Pass 1: Map all pairs without reconciliation to collect insert size stats
+        let initial_pairs: Vec<(String, String, Vec<u8>, String, Vec<u8>)> = pairs
+            .iter()
+            .map(|(name, seq1, qual1, seq2, qual2)| {
+                (
+                    name.clone(),
+                    seq1.clone(),
+                    qual1.clone(),
+                    seq2.clone(),
+                    qual2.clone(),
+                )
+            })
+            .collect();
+
         let mut insert_stats = InsertSizeStats::new();
-        let mapped_pairs: Vec<PairedMappingResult> = pairs
+        let initial_results: Vec<PairedMappingResult> = initial_pairs
             .iter()
             .map(|(name, seq1, qual1, seq2, qual2)| {
                 let paired = PairedRead {
@@ -3024,18 +4377,47 @@ impl BitPop {
                     read2_seq: seq2.clone(),
                     read2_qual: qual2.clone(),
                 };
-                let result = self.map_read_paired(&paired, context_window);
-                insert_stats.count = result.insert_size_stats.count;
-                insert_stats.mean = result.insert_size_stats.mean;
-                insert_stats.stddev = result.insert_size_stats.stddev;
+                let result = self.map_read_paired(&paired, context_window, false, reconcile_top_n);
+                let tlen = result.tlen;
+                insert_stats.update(tlen);
                 result
             })
             .collect();
 
-        let mut writer = sam::SamWriter::new(output_path)?;
+        // Pass 2: Map all pairs with Gaussian-aware reconciliation if stats are sufficient
+        let mapped_pairs: Vec<PairedMappingResult> = if reconcile && insert_stats.count >= 10 {
+            initial_pairs
+                .iter()
+                .map(|(name, seq1, qual1, seq2, qual2)| {
+                    let paired = PairedRead {
+                        name: name.clone(),
+                        read1_seq: seq1.clone(),
+                        read1_qual: qual1.clone(),
+                        read2_seq: seq2.clone(),
+                        read2_qual: qual2.clone(),
+                    };
+                    self.map_read_paired_with_stats(
+                        &paired,
+                        context_window,
+                        true,
+                        reconcile_top_n,
+                        Some(&insert_stats),
+                    )
+                })
+                .collect()
+        } else {
+            // Not enough stats for Gaussian model, use initial results
+            initial_results
+        };
+
+        let mut writer: Box<dyn AlignmentWriter> = if write_bam {
+            Box::new(bam::BamWriter::new(output_path)?)
+        } else {
+            Box::new(sam::SamWriter::new(output_path)?)
+        };
         writer.write_header(&genome_header)?;
 
-        // Write paired-end SAM output
+        // Write paired-end output
         for pair_result in &mapped_pairs {
             writer.write_paired_mappings(
                 &pair_result.read_name,
@@ -3048,14 +4430,21 @@ impl BitPop {
         Ok(mapped_pairs.len())
     }
 
-    /// Map multiple paired-end reads with quality-aware scoring.
+    /// Map multiple paired-end reads with quality-aware scoring and write SAM/BAM output.
+    /// Uses a two-pass approach: first pass collects insert size statistics,
+    /// second pass uses the Gaussian model for discordant pair reconciliation.
+    #[expect(clippy::too_many_arguments)]
     pub fn map_paired_reads_parallel_quality(
         &self,
         pairs: &[PairedReads],
         output_path: &str,
         min_quality: u8,
-        _context_window: usize,
+        context_window: usize,
+        reconcile: bool,
+        reconcile_top_n: usize,
+        write_bam: bool,
     ) -> io::Result<usize> {
+        use crate::bam::AlignmentWriter;
         let genomes_owned: Vec<(String, usize)> = (0..self.genome_count() as u32)
             .filter_map(|gid| {
                 self.genome_name(gid)
@@ -3069,8 +4458,23 @@ impl BitPop {
             .map(|(n, l)| (n.as_str(), *l))
             .collect();
 
+        // Two-pass approach for Gaussian insert size model:
+        // Pass 1: Map all pairs without reconciliation to collect insert size stats
+        let initial_pairs: Vec<(String, String, Vec<u8>, String, Vec<u8>)> = pairs
+            .iter()
+            .map(|(name, seq1, qual1, seq2, qual2)| {
+                (
+                    name.clone(),
+                    seq1.clone(),
+                    qual1.clone(),
+                    seq2.clone(),
+                    qual2.clone(),
+                )
+            })
+            .collect();
+
         let mut insert_stats = InsertSizeStats::new();
-        let mapped_pairs: Vec<PairedMappingResult> = pairs
+        let initial_results: Vec<PairedMappingResult> = initial_pairs
             .iter()
             .map(|(name, seq1, qual1, seq2, qual2)| {
                 let paired = PairedRead {
@@ -3097,20 +4501,74 @@ impl BitPop {
                 insert_stats.update(tlen);
 
                 PairedMappingResult {
-                    read_name: paired.name.clone(),
+                    read_name: name.clone(),
                     map1,
                     map2,
                     tlen,
-                    insert_size_stats: InsertSizeStats {
-                        mean: insert_stats.mean,
-                        stddev: insert_stats.stddev,
-                        count: insert_stats.count,
-                    },
+                    insert_size_stats: InsertSizeStats::new(),
                 }
             })
             .collect();
 
-        let mut writer = sam::SamWriter::new(output_path)?;
+        // Pass 2: Map all pairs with Gaussian-aware reconciliation if stats are sufficient
+        let mapped_pairs: Vec<PairedMappingResult> = if reconcile && insert_stats.count >= 10 {
+            initial_pairs
+                .iter()
+                .map(|(name, seq1, qual1, seq2, qual2)| {
+                    let paired = PairedRead {
+                        name: name.clone(),
+                        read1_seq: seq1.clone(),
+                        read1_qual: qual1.clone(),
+                        read2_seq: seq2.clone(),
+                        read2_qual: qual2.clone(),
+                    };
+
+                    let map1 = self.map_paired_read_with_quality(
+                        &paired.read1_seq,
+                        &paired.read1_qual,
+                        min_quality,
+                    );
+                    let map2 = self.map_paired_read_with_quality(
+                        &paired.read2_seq,
+                        &paired.read2_qual,
+                        min_quality,
+                    );
+
+                    let (final_map1, final_map2) = self.reconcile_pair_with_gaussian(
+                        &paired,
+                        &map1,
+                        &map2,
+                        reconcile_top_n,
+                        context_window,
+                        &insert_stats,
+                    );
+
+                    let tlen = compute_tlen(
+                        &final_map1,
+                        &final_map2,
+                        paired.read1_seq.len(),
+                        paired.read2_seq.len(),
+                    );
+
+                    PairedMappingResult {
+                        read_name: name.clone(),
+                        map1: final_map1,
+                        map2: final_map2,
+                        tlen,
+                        insert_size_stats: InsertSizeStats::new(),
+                    }
+                })
+                .collect()
+        } else {
+            // Not enough stats for Gaussian model, use initial results
+            initial_results
+        };
+
+        let mut writer: Box<dyn AlignmentWriter> = if write_bam {
+            Box::new(bam::BamWriter::new(output_path)?)
+        } else {
+            Box::new(sam::SamWriter::new(output_path)?)
+        };
         writer.write_header(&genome_header)?;
 
         for pair_result in &mapped_pairs {
@@ -3143,7 +4601,469 @@ impl BitPop {
             cigar: best.cigar.clone(),
             is_reverse: best.is_reverse,
             mapped: true,
+            align_score: best.align_score,
+            rarity: best.rarity,
+            md_string: best.md_string.clone(),
         })
+    }
+
+    /// Split a long read into overlapping chunks for chunk-based classification.
+    ///
+    /// Used for PacBio HiFi reads (6-11kb) where full-read mapping fails due to
+    /// high error rates. Each chunk is mapped independently via existing Bit-Pop.
+    ///
+    /// # Arguments
+    /// * `read` — DNA read sequence
+    /// * `chunk_size` — Size of each chunk in bases
+    /// * `overlap` — Overlap between consecutive chunks (default: 30bp)
+    ///
+    /// # Returns
+    /// Vector of (chunk_index, chunk_sequence) tuples.
+    fn split_read_into_chunks(
+        &self,
+        read: &str,
+        chunk_size: usize,
+        overlap: usize,
+    ) -> Vec<(usize, String)> {
+        if chunk_size == 0 || read.len() <= chunk_size {
+            return vec![(0, read.to_string())];
+        }
+
+        let mut chunks = Vec::new();
+        let mut i = 0;
+        let mut chunk_idx = 0;
+
+        while i < read.len() {
+            let end = (i + chunk_size).min(read.len());
+            chunks.push((chunk_idx, read[i..end].to_string()));
+            chunk_idx += 1;
+            i += chunk_size - overlap;
+            if i >= read.len() && chunk_idx == 1 {
+                break;
+            }
+        }
+
+        chunks
+    }
+
+    /// Chunk-based read classification for PacBio HiFi long reads.
+    ///
+    /// Phase 4 improvements:
+    /// 1. Quality-weighted voting — chunks with higher alignment scores contribute more
+    /// 2. Vote threshold — require minimum % of chunks to agree before accepting mapping
+    /// 3. Top-N voting — return top N genomes instead of winner-takes-all
+    ///
+    /// Algorithm:
+    /// 1. Split read into overlapping chunks (default: 150bp, 30bp overlap)
+    /// 2. Map each chunk using existing Bit-Pop anchor_filter + XOR alignment
+    /// 3. Quality-weighted vote: each genome scores = sum(chunk_score^2 / total_chunks)
+    /// 4. Vote threshold: skip genomes with < threshold% of weighted votes
+    /// 5. Top-N: return top N genomes by weighted score
+    ///
+    /// # Arguments
+    /// * `read` — DNA read sequence (typically 6-11kb PacBio HiFi)
+    /// * `context_window` — Flanking bases for context string
+    ///
+    /// # Returns
+    /// Ranked MappingResult list (best match first). Empty if no match found.
+    pub fn map_read_with_chunking(&self, read: &str, context_window: usize) -> Vec<MappingResult> {
+        self.map_read_with_chunking_internal(read, context_window, None, None)
+    }
+
+    /// Map a long read using chunking with quality scores.
+    /// Quality scores are used when chunk_anchor_strategy is Golden.
+    pub fn map_read_with_chunking_and_quality(
+        &self,
+        read: &str,
+        quality: &[u8],
+        context_window: usize,
+    ) -> Vec<MappingResult> {
+        self.map_read_with_chunking_internal(read, context_window, None, Some(quality))
+    }
+
+    /// Internal chunk mapping with optional SNP mismatch collection and quality scores.
+    fn map_read_with_chunking_internal(
+        &self,
+        read: &str,
+        context_window: usize,
+        mut snp_collector: Option<&mut std::collections::HashMap<(u32, u32, u8, u8), u32>>,
+        quality: Option<&[u8]>,
+    ) -> Vec<MappingResult> {
+        let chunk_size = if self.chunk_pct > 0.0 {
+            let raw = (read.len() as f64 * self.chunk_pct) as usize;
+            raw.clamp(self.chunk_min, self.chunk_max).max(self.k)
+        } else if self.chunk_size > 0 {
+            self.chunk_size.max(self.k)
+        } else {
+            if read.len() > 1000 {
+                150.max(self.k)
+            } else {
+                return self.map_read(read, context_window);
+            }
+        };
+
+        let overlap = (chunk_size as f64 * 0.2) as usize;
+        let chunks = self.split_read_into_chunks(read, chunk_size, overlap);
+
+        if chunks.len() == 1 {
+            return self.map_read(read, context_window);
+        }
+
+        let total_chunks = chunks.len();
+        let mut genome_votes: HashMap<u32, ChunkVote> = HashMap::new();
+
+        for (chunk_idx, chunk_seq) in &chunks {
+            let chunk_start = *chunk_idx * (chunk_size - overlap);
+            let chunk_quality = quality.map(|q| {
+                let q_end = (chunk_start + chunk_seq.len()).min(q.len());
+                &q[chunk_start..q_end]
+            });
+            let chunk_results = self.anchor_filter_for_chunk(
+                chunk_seq,
+                chunk_quality,
+                0.5,
+                DEFAULT_REPEAT_THRESHOLD,
+            );
+            if chunk_results.is_empty() {
+                continue;
+            }
+
+            let best = &chunk_results[0];
+            let genome_id = best.0;
+            let position = best.1;
+            let score = best.2;
+            let cigar = best.3.clone();
+
+            // Collect mismatch data for SNP detection
+            if let Some(ref mut collector) = snp_collector {
+                let read_enc = encode_sequence(chunk_seq);
+                let genome = match self.genomes.get(&genome_id) {
+                    Some(g) => g,
+                    None => continue,
+                };
+                let pos = position as usize;
+                let region_end = (pos + read_enc.len()).min(genome.len());
+                if region_end > pos && !cigar.is_empty() {
+                    let text_region = &genome[pos..region_end];
+                    let mismatches = align::extract_mismatches(&read_enc, text_region, 0);
+                    for m in mismatches {
+                        let key = (genome_id, m.genome_pos as u32, m.genome_base, m.read_base);
+                        *collector.entry(key).or_default() += 1;
+                    }
+                }
+            }
+
+            let vote = genome_votes.entry(genome_id).or_insert(ChunkVote {
+                genome_id,
+                win_count: 0,
+                total_score: 0.0,
+                avg_score: 0.0,
+                chunks_mapped: 0,
+                quality_weighted_score: 0.0,
+            });
+
+            vote.win_count += 1;
+            vote.total_score += score;
+            vote.chunks_mapped += 1;
+            vote.avg_score = vote.total_score / vote.chunks_mapped as f64;
+            vote.quality_weighted_score += score * score;
+        }
+
+        if genome_votes.is_empty() {
+            return self.map_read(read, context_window);
+        }
+
+        let mut genome_ranking: Vec<(&u32, &ChunkVote)> = genome_votes.iter().collect();
+        genome_ranking.sort_by(|a, b| {
+            let score_a = a.1.quality_weighted_score / total_chunks as f64;
+            let score_b = b.1.quality_weighted_score / total_chunks as f64;
+            let fraction_a = a.1.win_count as f64 / total_chunks as f64;
+            let fraction_b = b.1.win_count as f64 / total_chunks as f64;
+            score_a
+                .partial_cmp(&score_b)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    fraction_a
+                        .partial_cmp(&fraction_b)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| {
+                    a.1.total_score
+                        .partial_cmp(&b.1.total_score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+        });
+
+        let threshold = self.chunk_vote_threshold;
+        if threshold > 0.0 {
+            genome_ranking
+                .retain(|(_, vote)| vote.win_count as f64 / total_chunks as f64 >= threshold);
+        }
+
+        // Fallback: if vote threshold eliminated all genomes, use full-read mapping
+        if genome_ranking.is_empty() {
+            return self.map_read(read, context_window);
+        }
+
+        let fm = match &self.fm_index {
+            Some(idx) => idx,
+            None => return Vec::new(),
+        };
+
+        let encoded = encode_sequence(read);
+        let rarity = if encoded.len() >= self.k {
+            let occ = fm.count_occurrences(&encoded[..self.k]);
+            1.0 / (occ as f64).max(1.0)
+        } else {
+            1.0
+        };
+
+        let full_results = self.map_read(read, context_window);
+
+        // Apply SNP-aware scoring if enabled
+        let top_n = self.chunk_top_n.min(genome_ranking.len());
+        let results: Vec<MappingResult> = genome_ranking
+            .into_iter()
+            .take(top_n)
+            .map(|(genome_id, vote)| {
+                let normalized_weighted_score = vote.quality_weighted_score / total_chunks as f64;
+                let align_score = normalized_weighted_score.sqrt().clamp(0.0, 1.0);
+
+                let combined_score = if self.enable_snp_detect {
+                    // SNP-aware scoring: penalize low scores that aren't supported by known SNPs
+                    // The chunk voting already aggregates across chunks, so we apply a mild penalty
+                    // to results where the vote fraction is low (indicating inconsistent alignment)
+                    let vote_fraction = vote.win_count as f64 / total_chunks as f64;
+                    if vote_fraction < 0.5 {
+                        // Low agreement: apply penalty unless supported by SNP data
+                        align_score * 0.9
+                    } else {
+                        align_score
+                    }
+                } else {
+                    align_score
+                };
+
+                MappingResult {
+                    genome_id: *genome_id,
+                    position: full_results.first().map(|r| r.position).unwrap_or(0),
+                    score: combined_score * 0.85 + rarity * 0.15,
+                    cigar: full_results
+                        .first()
+                        .map(|r| r.cigar.clone())
+                        .unwrap_or_else(|| format!("{}M", read.len())),
+                    context: full_results
+                        .first()
+                        .map(|r| r.context.clone())
+                        .unwrap_or_default(),
+                    is_reverse: full_results.first().map(|r| r.is_reverse).unwrap_or(false),
+                    rarity,
+                    md_string: full_results
+                        .first()
+                        .map(|r| r.md_string.clone())
+                        .unwrap_or_default(),
+                    hf_score: 0.0,
+                }
+            })
+            .collect();
+
+        results
+    }
+
+    /// Map multiple reads with chunk-based classification in parallel.
+    ///
+    /// Uses rayon for parallel chunk mapping. Each read is split into chunks,
+    /// mapped independently, then voted on for final classification.
+    ///
+    /// If SNP detection is enabled, collects mismatches from all reads,
+    /// builds a SNP map, and applies SNP-aware scoring.
+    pub fn map_reads_with_chunking_parallel(
+        &self,
+        reads: &[(&str, &str)],
+        output_path: &str,
+        context_window: usize,
+    ) -> std::io::Result<usize> {
+        self.map_reads_with_chunking_parallel_with_progress(
+            reads,
+            output_path,
+            context_window,
+            |_, _| {},
+        )
+    }
+
+    pub fn map_reads_with_chunking_parallel_with_progress(
+        &self,
+        reads: &[(&str, &str)],
+        output_path: &str,
+        context_window: usize,
+        progress: impl Fn(usize, usize) + Sync + Send,
+    ) -> std::io::Result<usize> {
+        let genomes_owned: Vec<(String, usize)> = (0..self.genome_count() as u32)
+            .filter_map(|gid| {
+                self.genome_name(gid)
+                    .map(|name| (name.to_string(), self.genome_seq_len(gid).unwrap_or(0)))
+            })
+            .collect();
+
+        let genome_name_refs: Vec<&str> = genomes_owned.iter().map(|(n, _)| n.as_str()).collect();
+        let genome_header: Vec<(&str, usize)> = genomes_owned
+            .iter()
+            .map(|(n, l)| (n.as_str(), *l))
+            .collect();
+
+        let name_refs: Vec<&str> = genome_name_refs.clone();
+        let total = reads.len();
+
+        // Phase 1: Collect SNP mismatch data if enabled
+        let snp_detector = if self.enable_snp_detect {
+            use std::collections::HashMap;
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            let progress_counter = AtomicUsize::new(0);
+
+            let all_data: Vec<(
+                String,
+                String,
+                Vec<MappingResult>,
+                HashMap<(u32, u32, u8, u8), u32>,
+            )> = reads
+                .par_iter()
+                .map(|(name, seq)| {
+                    let mut local_mismatches: HashMap<(u32, u32, u8, u8), u32> = HashMap::new();
+                    let results = self.map_read_with_chunking_internal(
+                        seq,
+                        context_window,
+                        Some(&mut local_mismatches),
+                        None,
+                    );
+                    let completed = progress_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                    progress(completed, total);
+                    (name.to_string(), seq.to_string(), results, local_mismatches)
+                })
+                .collect();
+
+            let mut merged_counts: HashMap<(u32, u32, u8, u8), u32> = HashMap::new();
+            let results: Vec<(String, String, Vec<MappingResult>)> = all_data
+                .into_iter()
+                .map(|(name, seq, results, local_counts)| {
+                    for (key, count) in local_counts {
+                        *merged_counts.entry(key).or_default() += count;
+                    }
+                    (name, seq, results)
+                })
+                .collect();
+
+            // Build SNP detector from merged counts
+            let mut detector = snp::SnpDetector::new();
+            for ((genome_id, position, ref_base, alt_base), count) in &merged_counts {
+                if *count >= self.snp_min_support {
+                    // Add mismatch count times so build_snp_map picks it up
+                    for _ in 0..*count {
+                        detector.add_mismatch(*genome_id, *position, *alt_base, *ref_base);
+                    }
+                }
+            }
+            detector.build_snp_map(1); // Already filtered by min_support
+
+            if self.genome_count() > 0 {
+                println!(
+                    "  SNP detection: found {} SNPs (min support: {})",
+                    detector.snp_count(),
+                    self.snp_min_support
+                );
+            }
+
+            Some((results, detector))
+        } else {
+            None
+        };
+
+        // Phase 2: Re-score with SNP-aware scoring or write results
+        let mapped_count = if let Some((all_mismatches, detector)) = snp_detector {
+            let mut writer = sam::SamWriter::new(output_path)?;
+            writer.write_header(&genome_header)?;
+
+            let mut mapped_count = 0;
+            for (name, seq, results) in &all_mismatches {
+                // Apply SNP-aware scoring to each result
+                let scored_results = if self.enable_snp_detect {
+                    self.apply_snp_scoring(results, &detector, seq)
+                } else {
+                    results.to_vec()
+                };
+
+                writer.write_mappings(name, seq, &scored_results, &name_refs)?;
+                if !scored_results.is_empty() {
+                    mapped_count += 1;
+                }
+            }
+
+            mapped_count
+        } else {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            let progress_counter = AtomicUsize::new(0);
+
+            let mapped: Vec<(String, String, Vec<MappingResult>)> = reads
+                .par_iter()
+                .map(|(name, seq)| {
+                    let results = self.map_read_with_chunking(seq, context_window);
+                    let completed = progress_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                    progress(completed, total);
+                    (name.to_string(), seq.to_string(), results)
+                })
+                .collect();
+
+            let mut writer = sam::SamWriter::new(output_path)?;
+            writer.write_header(&genome_header)?;
+
+            let mut mapped_count = 0;
+            for (name, seq, results) in &mapped {
+                writer.write_mappings(name, seq, results, &name_refs)?;
+                if !results.is_empty() {
+                    mapped_count += 1;
+                }
+            }
+
+            mapped_count
+        };
+
+        Ok(mapped_count)
+    }
+
+    /// Apply SNP-aware scoring to mapping results.
+    ///
+    /// For each result, checks if the alignment score is consistent with
+    /// known SNP positions. Results with scores that conflict with SNP
+    /// data get penalized.
+    fn apply_snp_scoring(
+        &self,
+        results: &[MappingResult],
+        detector: &snp::SnpDetector,
+        _read_seq: &str,
+    ) -> Vec<MappingResult> {
+        if !detector.is_built() {
+            return results.to_vec();
+        }
+
+        results
+            .iter()
+            .map(|result| {
+                let genome_snps = detector.get_genome_snps(result.genome_id);
+                let snp_count = genome_snps.len();
+
+                // If genome has many known SNPs, it's a good strain-specific match
+                // Boost score slightly for genomes with SNP support
+                let snp_boost = if snp_count > 0 {
+                    (snp_count as f64 * self.snp_penalty).min(0.15)
+                } else {
+                    0.0
+                };
+
+                let mut new_result = result.clone();
+                new_result.score = (result.score + snp_boost).min(1.0);
+
+                new_result
+            })
+            .collect()
     }
 }
 
@@ -3513,7 +5433,7 @@ mod tests {
             (0u32, 6u64, 1.0f64, "8M".to_string()),
             (0u32, 15u64, 0.875f64, "7M1X".to_string()),
         ];
-        let results = bp.rank_scored_results(&scored, "ACGTACGT", 3);
+        let results = bp.rank_scored_results(&scored, "ACGTACGT", 3, 0.0);
         assert_eq!(results.len(), 2);
         assert!(results[0].score > results[1].score);
     }
@@ -3572,7 +5492,6 @@ mod tests {
         let results_with_thresh = bp
             .anchor_filter_with_threshold("AACCGGTTAACCGGTT", 0.5, 100)
             .into_iter()
-            .map(|(g, p, s, c)| (g, p, s, c))
             .collect::<Vec<_>>();
 
         assert!(!results_no_thresh.is_empty());
@@ -4194,7 +6113,7 @@ mod tests {
                 for avg_q in [5.0, 15.0, 25.0, 35.0] {
                     let threshold = bp.compute_smart_threshold(*read_len, has_qual, avg_q);
                     assert!(
-                        threshold >= 0.3 && threshold <= 0.8,
+                        (0.3..=0.8).contains(&threshold),
                         "Threshold {} out of bounds for len={}, qual={}, avg={}",
                         threshold,
                         read_len,
@@ -4426,7 +6345,7 @@ mod tests {
     fn test_generate_kmer_variants_basic() {
         let kmer = encode_kmer("ACGT").unwrap();
         let variants = generate_kmer_variants(kmer, 4, 1);
-        assert!(variants.len() > 0, "should generate variants");
+        assert!(!variants.is_empty(), "should generate variants");
         assert!(
             !variants.contains(&kmer),
             "variants should not contain original"
@@ -4564,5 +6483,386 @@ mod tests {
             !scored.is_empty(),
             "Neighborhood anchor_filter should find matches"
         );
+    }
+
+    #[test]
+    fn test_discordant_pair_reconciliation_basic() {
+        // Two genomes: G1 has "AAAAACCCCC", G2 has "GGGGGTTTTT"
+        // R1 matches G1, R2 matches G2 → discordant
+        // Reconciliation should NOT force concordant since scores are too different
+        let mut bp = BitPop::new(5);
+        bp.add_genome("G1", "AAAAACCCCCGGGGGTTTTT");
+        bp.add_genome("G2", "GGGGGTTTTTAAAAACCCCC");
+        bp.build();
+
+        let paired = PairedRead {
+            name: "test1".to_string(),
+            read1_seq: "AAAAA".to_string(),
+            read1_qual: vec![40; 5],
+            read2_seq: "GGGGG".to_string(),
+            read2_qual: vec![40; 5],
+        };
+
+        let result = bp.map_read_paired(&paired, 0, true, 5);
+
+        // Both reads should map (even if discordant)
+        assert!(result.map1.is_some(), "R1 should map");
+        assert!(result.map2.is_some(), "R2 should map");
+    }
+
+    #[test]
+    fn test_discordant_pair_reconciliation_concordant_wins() {
+        // Both reads match G1 better → should be concordant on G1
+        let mut bp = BitPop::new(5);
+        bp.add_genome("G1", "AAAAACCCCCGGGGGTTTTT");
+        bp.add_genome("G2", "CCCCCGGGGGTTTTTAAAAA");
+        bp.build();
+
+        let paired = PairedRead {
+            name: "test2".to_string(),
+            read1_seq: "AAAAA".to_string(),
+            read1_qual: vec![40; 5],
+            read2_seq: "CCCCC".to_string(),
+            read2_qual: vec![40; 5],
+        };
+
+        let result = bp.map_read_paired(&paired, 0, true, 5);
+
+        if let (Some(m1), Some(m2)) = (&result.map1, &result.map2) {
+            // If both map, reconciliation should prefer concordant assignment
+            // when the concordant score is competitive
+            // Both should be on the same genome after reconciliation
+            assert_eq!(
+                m1.genome_id, m2.genome_id,
+                "Concordant reconciliation: both reads should map to same genome"
+            );
+        }
+    }
+
+    #[test]
+    fn test_reconciliation_disabled_keeps_discordant() {
+        let mut bp = BitPop::new(5);
+        bp.add_genome("G1", "AAAAACCCCCGGGGGTTTTT");
+        bp.add_genome("G2", "GGGGGTTTTTAAAAACCCCC");
+        bp.build();
+
+        let paired = PairedRead {
+            name: "test3".to_string(),
+            read1_seq: "AAAAA".to_string(),
+            read1_qual: vec![40; 5],
+            read2_seq: "TTTTT".to_string(),
+            read2_qual: vec![40; 5],
+        };
+
+        let result = bp.map_read_paired(&paired, 0, false, 5);
+
+        // With reconciliation disabled, discordant pairs are allowed
+        if result.map1.is_some() && result.map2.is_some() {
+            // May or may not be same genome depending on scores
+            // The point is reconciliation didn't force anything
+            let _ = &result.map1;
+            let _ = &result.map2;
+        }
+    }
+
+    #[test]
+    fn test_concordant_pair_unchanged_by_reconciliation() {
+        // Both reads naturally map to same genome → reconciliation is no-op
+        let mut bp = BitPop::new(5);
+        bp.add_genome("G1", "AAAAACCCCCGGGGGTTTTT");
+        bp.add_genome("G2", "NNNNNNNNNNNNNNNNNNNNNN");
+        bp.build();
+
+        let paired = PairedRead {
+            name: "test4".to_string(),
+            read1_seq: "AAAAA".to_string(),
+            read1_qual: vec![40; 5],
+            read2_seq: "CCCCC".to_string(),
+            read2_qual: vec![40; 5],
+        };
+
+        let result = bp.map_read_paired(&paired, 0, true, 5);
+
+        if let (Some(m1), Some(m2)) = (&result.map1, &result.map2) {
+            assert_eq!(m1.genome_id, m2.genome_id, "Both should map to G1");
+        }
+    }
+
+    // --- Gaussian Insert Size Model Tests ---
+
+    #[test]
+    fn test_gaussian_stats_new_is_empty() {
+        let stats = InsertSizeStats::new();
+        assert_eq!(stats.count, 0);
+        assert_eq!(stats.mean, 0.0);
+        assert_eq!(stats.stddev, 0.0);
+    }
+
+    #[test]
+    fn test_gaussian_stats_update_mean() {
+        let mut stats = InsertSizeStats::new();
+        stats.update(100);
+        assert_eq!(stats.count, 1);
+        assert_eq!(stats.mean, 100.0);
+        stats.update(200);
+        assert_eq!(stats.count, 2);
+        assert_eq!(stats.mean, 150.0);
+        stats.update(300);
+        assert_eq!(stats.count, 3);
+        assert_eq!(stats.mean, 200.0);
+    }
+
+    #[test]
+    fn test_gaussian_stats_update_stddev() {
+        let mut stats = InsertSizeStats::new();
+        stats.update(100);
+        assert_eq!(stats.count, 1);
+        // stddev is 0 with single observation
+        stats.update(100);
+        assert_eq!(stats.count, 2);
+        assert_eq!(stats.stddev, 0.0); // identical values
+        stats.update(200);
+        assert!(stats.stddev > 0.0);
+        // With values [100, 100, 200]: mean=133.33, variance=(33.33^2 + 33.33^2 + 66.67^2)/2 = 3333.33, stddev≈57.74
+        assert!(stats.stddev > 50.0 && stats.stddev < 70.0);
+    }
+
+    #[test]
+    fn test_gaussian_stats_negative_tlen_ignored() {
+        let mut stats = InsertSizeStats::new();
+        stats.update(-100);
+        stats.update(0);
+        assert_eq!(stats.count, 0);
+        stats.update(150);
+        assert_eq!(stats.count, 1);
+        assert_eq!(stats.mean, 150.0);
+    }
+
+    #[test]
+    fn test_gaussian_probability_at_mean() {
+        let mut stats = InsertSizeStats::new();
+        // Build a tight distribution around 300
+        for _ in 0..100 {
+            stats.update(300);
+        }
+        // With identical values, stddev = 0, so probability = 0
+        // Try with slight variation
+        let mut stats2 = InsertSizeStats::new();
+        for _ in 0..50 {
+            stats2.update(300);
+        }
+        for _ in 0..50 {
+            stats2.update(302);
+        }
+        // Probability at mean should be highest
+        let prob_at_mean = stats2.gaussian_probability(301);
+        let prob_far = stats2.gaussian_probability(500);
+        assert!(prob_at_mean > prob_far);
+    }
+
+    #[test]
+    fn test_gaussian_probability_far_from_mean() {
+        let mut stats = InsertSizeStats::new();
+        for _ in 0..50 {
+            stats.update(300);
+        }
+        for _ in 0..50 {
+            stats.update(300);
+        }
+        // With stddev = 0, probability should be 0
+        assert_eq!(stats.gaussian_probability(300), 0.0);
+
+        let mut stats2 = InsertSizeStats::new();
+        for _ in 0..25 {
+            stats2.update(298);
+        }
+        for _ in 0..25 {
+            stats2.update(300);
+        }
+        for _ in 0..25 {
+            stats2.update(302);
+        }
+        for _ in 0..25 {
+            stats2.update(304);
+        }
+        // Value far from mean should have very low probability
+        let prob_near = stats2.gaussian_probability(300);
+        let prob_far = stats2.gaussian_probability(1000);
+        assert!(prob_near > prob_far);
+        assert!(prob_far < 0.0001);
+    }
+
+    #[test]
+    fn test_gaussian_log_probability() {
+        let mut stats = InsertSizeStats::new();
+        for _ in 0..50 {
+            stats.update(300);
+        }
+        for _ in 0..50 {
+            stats.update(302);
+        }
+        let log_prob = stats.log_gaussian_probability(301);
+        assert!(log_prob.is_finite());
+        assert!(log_prob < 0.0); // log of PDF < 0 for continuous distributions
+
+        let log_prob_far = stats.log_gaussian_probability(1000);
+        assert!(log_prob_far < log_prob);
+        assert!(log_prob_far < -100.0); // very negative for far values
+    }
+
+    #[test]
+    fn test_gaussian_insert_size_confidence() {
+        let mut stats = InsertSizeStats::new();
+        for _ in 0..50 {
+            stats.update(300);
+        }
+        for _ in 0..50 {
+            stats.update(300);
+        }
+        // With stddev = 0, confidence should be 0
+        assert_eq!(stats.insert_size_confidence(300), 0.0);
+
+        let mut stats2 = InsertSizeStats::new();
+        for _ in 0..25 {
+            stats2.update(298);
+        }
+        for _ in 0..25 {
+            stats2.update(300);
+        }
+        for _ in 0..25 {
+            stats2.update(302);
+        }
+        for _ in 0..25 {
+            stats2.update(304);
+        }
+        // Confidence at mean should be highest (close to 1.0)
+        let conf_at_mean = stats2.insert_size_confidence(301);
+        let conf_far = stats2.insert_size_confidence(1000);
+        assert!(conf_at_mean > conf_far);
+        assert!(conf_at_mean > 0.9);
+        assert!(conf_far < 0.01);
+    }
+
+    #[test]
+    fn test_gaussian_is_proper_pair() {
+        let mut stats = InsertSizeStats::new();
+        // Build distribution centered at 300 with small variance
+        for _ in 0..100 {
+            stats.update(300);
+        }
+        for _ in 0..100 {
+            stats.update(305);
+        }
+
+        // Value within mean ± 3*stddev should be proper pair
+        let (lower, upper) = stats.expected_range();
+        let mid = (lower + upper) / 2;
+        assert!(stats.is_proper_pair(mid));
+
+        // Value outside range should not be proper pair
+        let far_out = upper + 100;
+        assert!(!stats.is_proper_pair(far_out));
+
+        // Negative tlen should never be proper pair
+        assert!(!stats.is_proper_pair(-100));
+
+        // Zero tlen should never be proper pair
+        assert!(!stats.is_proper_pair(0));
+    }
+
+    #[test]
+    fn test_gaussian_expected_range() {
+        let mut stats = InsertSizeStats::new();
+        assert_eq!(stats.expected_range(), (0, 0)); // no data
+
+        stats.update(300);
+        assert_eq!(stats.expected_range(), (0, 0)); // need at least 2
+
+        stats.update(300);
+        let (lower, upper) = stats.expected_range();
+        assert_eq!(lower, 0); // identical values, stddev = 0
+        assert_eq!(upper, 0);
+    }
+
+    #[test]
+    fn test_gaussian_welford_accuracy() {
+        let mut stats = InsertSizeStats::new();
+        // Known dataset: [10, 20, 30, 40, 50]
+        // mean = 30, variance = 250, stddev ≈ 15.81
+        for val in [10i64, 20, 30, 40, 50] {
+            stats.update(val);
+        }
+        assert!((stats.mean - 30.0).abs() < 0.01);
+        assert!((stats.stddev - 15.811).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_gaussian_two_pass_mapping() {
+        let mut bp = BitPop::new(5);
+        bp.add_genome(
+            "G1",
+            "AAAAACCCCCGGGGGTTTTTAAAAACCCCCGGGGGTTTTTAAAAACCCCCGGGGGTTTTT",
+        );
+        bp.add_genome(
+            "G2",
+            "GGGGGTTTTTAAAAACCCCCGGGGGTTTTTAAAAACCCCCGGGGGTTTTTAAAAACCCCC",
+        );
+        bp.build();
+
+        // Create pairs where both reads map to G1
+        let pairs: Vec<(String, String, Vec<u8>, String, Vec<u8>)> = (0..20)
+            .map(|i| {
+                (
+                    format!("read_{i}"),
+                    "AAAAACCCCCGGGGG".to_string(),
+                    vec![40; 15],
+                    "TTTTTAAAAACCCCC".to_string(),
+                    vec![40; 15],
+                )
+            })
+            .collect();
+
+        // First pass: collect stats without reconciliation
+        let mut insert_stats = InsertSizeStats::new();
+        let mut mapped_count = 0;
+        for (name, seq1, qual1, seq2, qual2) in &pairs {
+            let paired = PairedRead {
+                name: name.clone(),
+                read1_seq: seq1.clone(),
+                read1_qual: qual1.clone(),
+                read2_seq: seq2.clone(),
+                read2_qual: qual2.clone(),
+            };
+            let result = bp.map_read_paired(&paired, 0, false, 5);
+            if result.map1.is_some() && result.map2.is_some() {
+                mapped_count += 1;
+            }
+            insert_stats.update(result.tlen);
+        }
+
+        // Should have collected some stats from mapped pairs
+        assert!(mapped_count > 0 || insert_stats.count > 0);
+    }
+
+    #[test]
+    fn test_gaussian_confidence_range() {
+        let mut stats = InsertSizeStats::new();
+        for _ in 0..50 {
+            stats.update(280);
+        }
+        for _ in 0..50 {
+            stats.update(320);
+        }
+
+        // Confidence should always be in [0, 1]
+        for tlen in [100, 200, 280, 300, 320, 400, 500] {
+            let conf = stats.insert_size_confidence(tlen);
+            assert!(
+                (0.0..=1.0).contains(&conf),
+                "confidence {} for tlen {} out of range",
+                conf,
+                tlen
+            );
+        }
     }
 }

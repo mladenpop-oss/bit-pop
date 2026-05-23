@@ -20,6 +20,11 @@ def simulate_errors(seq, error_rate, quality_base=30):
     qualities = []
     
     for base in seq:
+        if base not in BASES:
+            # Skip N or other ambiguous bases
+            mutated.append(base)
+            qualities.append(quality_base)
+            continue
         if random.random() < error_rate:
             # Mutation
             new_base = random.choice(MUTATIONS[base])

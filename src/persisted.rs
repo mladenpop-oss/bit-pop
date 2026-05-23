@@ -12,7 +12,7 @@ type GenomeData = (HashMap<u32, Vec<u8>>, HashMap<u32, String>);
 // --- File Format Constants ---
 
 const MAGIC: [u8; 4] = *b"BITP";
-const VERSION: u32 = 5;
+const VERSION: u32 = 8;
 const HEADER_SIZE: usize = 64;
 const SECTION_NAME_LEN: usize = 16;
 const SECTION_HEADER_SIZE: usize = 48; // name[16] + offset(8) + comp_size(8) + decomp_size(8) + flags(8)
@@ -22,9 +22,11 @@ const SECTION_BWT_UNCOMP: [u8; 16] = *b"BWT_UNCOMP\0\0\0\0\0\0";
 const SECTION_SA_UNCOMP: [u8; 16] = *b"SA_UNCOMP\0\0\0\0\0\0\0";
 const SECTION_FM_INDEX: [u8; 16] = *b"FM_INDEX\0\0\0\0\0\0\0\0";
 const SECTION_GENOMES: [u8; 16] = *b"GENOMES\0\0\0\0\0\0\0\0\0";
+const SECTION_SPACED_SEED: [u8; 16] = *b"SPACED_SEED\0\0\0\0\0";
+const SECTION_HF: [u8; 16] = *b"HF_PROFILES\0\0\0\0\0";
 
-/// Number of sections in v5+ format (BWT_UNCOMP + SA_UNCOMP + FM_INDEX + GENOMES)
-const NUM_SECTIONS_V5: usize = 4;
+/// Number of sections in v5+ format (BWT_UNCOMP + SA_UNCOMP + FM_INDEX + GENOMES + SPACED_SEED + HF)
+const NUM_SECTIONS_V5: usize = 6;
 
 /// Represents a section in the persisted file.
 #[allow(dead_code)]
@@ -60,9 +62,157 @@ impl FileHeader {
 
 // --- Serialization (save) ---
 
+fn serialize_spaced_seed(bp: &BitPop) -> Vec<u8> {
+    let mut data = Vec::new();
+
+    // Spaced seed pattern as binary string
+    let pattern_str: String = bp
+        .spaced_seed_pattern
+        .iter()
+        .map(|&b| if b { '1' } else { '0' })
+        .collect();
+    data.extend_from_slice(&(pattern_str.len() as u32).to_le_bytes());
+    data.extend_from_slice(pattern_str.as_bytes());
+
+    // Spaced seed hash table
+    if let Some(hash_table) = &bp.spaced_seed_hash {
+        data.extend_from_slice(&1u32.to_le_bytes()); // has_hash = true
+        data.extend_from_slice(&(hash_table.len() as u64).to_le_bytes());
+
+        for (key, positions) in hash_table {
+            data.extend_from_slice(&key.to_le_bytes());
+            data.extend_from_slice(&(positions.len() as u64).to_le_bytes());
+            for &(gid, pos) in positions {
+                data.extend_from_slice(&gid.to_le_bytes());
+                data.extend_from_slice(&pos.to_le_bytes());
+            }
+        }
+    } else {
+        data.extend_from_slice(&0u32.to_le_bytes()); // has_hash = false
+    }
+
+    data
+}
+
+fn serialize_hf(bp: &BitPop) -> Vec<u8> {
+    let mut data = Vec::new();
+    data.extend_from_slice(&(bp.hf_profiles.len() as u64).to_le_bytes());
+    for (gid, profile) in &bp.hf_profiles {
+        data.extend_from_slice(&gid.to_le_bytes());
+        let profile_bytes = crate::hf::serialize_hf_profile(profile);
+        data.extend_from_slice(&(profile_bytes.len() as u64).to_le_bytes());
+        data.extend_from_slice(&profile_bytes);
+    }
+    data
+}
+
+fn deserialize_spaced_seed(data: &[u8], bp: &mut BitPop) {
+    let mut pos = 0;
+
+    // Parse pattern
+    if pos + 4 > data.len() {
+        return;
+    }
+    let pattern_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+    pos += 4;
+
+    if pos + pattern_len > data.len() {
+        return;
+    }
+    let pattern_str = String::from_utf8(data[pos..pos + pattern_len].to_vec()).unwrap_or_default();
+    pos += pattern_len;
+
+    bp.spaced_seed_pattern = pattern_str.chars().map(|c| c == '1').collect();
+
+    // Parse hash table
+    if pos + 4 > data.len() {
+        return;
+    }
+    let has_hash = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) != 0;
+    pos += 4;
+
+    if has_hash {
+        if pos + 8 > data.len() {
+            return;
+        }
+        let num_entries = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap()) as usize;
+        pos += 8;
+
+        let mut hash_table = std::collections::HashMap::new();
+
+        for _ in 0..num_entries {
+            if pos + 8 + 8 + 8 > data.len() {
+                break;
+            }
+            let key = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
+            pos += 8;
+
+            let num_positions = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap()) as usize;
+            pos += 8;
+
+            let mut positions = Vec::with_capacity(num_positions);
+            for _ in 0..num_positions {
+                if pos + 16 > data.len() {
+                    break;
+                }
+                let gid = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
+                pos += 4;
+                let _reserved = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
+                pos += 8;
+                positions.push((gid, _reserved));
+            }
+
+            hash_table.insert(key, positions);
+        }
+
+        bp.spaced_seed_hash = Some(hash_table);
+    }
+}
+
+fn deserialize_hf_profiles(data: &[u8], bp: &mut BitPop) {
+    let mut pos = 0;
+    if pos + 8 > data.len() {
+        return;
+    }
+    let num_profiles: usize = {
+        let bytes: [u8; 8] = data[pos..pos + 8].try_into().unwrap_or_default();
+        u64::from_le_bytes(bytes) as usize
+    };
+    pos += 8;
+
+    for _ in 0..num_profiles {
+        if pos + 8 + 8 > data.len() {
+            break;
+        }
+        let gid: u32 = {
+            let bytes: [u8; 4] = data[pos..pos + 4].try_into().unwrap_or_default();
+            u32::from_le_bytes(bytes)
+        };
+        pos += 4;
+        let _reserved: u32 = {
+            let bytes: [u8; 4] = data[pos..pos + 4].try_into().unwrap_or_default();
+            u32::from_le_bytes(bytes)
+        };
+        pos += 4;
+        let profile_len: usize = {
+            let bytes: [u8; 8] = data[pos..pos + 8].try_into().unwrap_or_default();
+            u64::from_le_bytes(bytes) as usize
+        };
+        pos += 8;
+        if pos + profile_len > data.len() {
+            break;
+        }
+        let profile_bytes = &data[pos..pos + profile_len];
+        pos += profile_len;
+        if let Some(profile) = crate::hf::deserialize_hf_profile(profile_bytes) {
+            bp.hf_profiles.insert(gid, profile);
+        }
+    }
+}
+
 /// Save a BitPop instance to a file using the memmap-friendly format.
-/// Format v5: [header][section_table][BWT_UNCOMP][SA_UNCOMP][FM_INDEX][GENOMES][checksum]
-/// BWT_UNCOMP and SA_UNCOMP are stored uncompressed for direct memmap access (<10ms load).
+/// Format v7: [header][section_table][BWT_COMPRESSED][SA_COMPRESSED][FM_INDEX][GENOMES][checksum]
+/// Both BWT and SA use zstd compression for smaller file size.
 pub fn save_bitpop(bp: &BitPop, path: &str) -> IoResult<()> {
     // 1. Serialize FM-Index (compressed fallback)
     let fm_data = serialize_fm_index(bp)?;
@@ -74,11 +224,12 @@ pub fn save_bitpop(bp: &BitPop, path: &str) -> IoResult<()> {
     let genomes_compressed = zstd::encode_all(genomes_data.as_slice(), 3)
         .map_err(|e| std::io::Error::other(format!("zstd genomes compress failed: {}", e)))?;
 
-    // 3. Serialize BWT uncompressed (4 values per byte, 2 bits each)
-    let bwt_uncomp = serialize_bwt_uncompressed(bp)?;
+    // 3. Serialize BWT with zstd compression
+    let bwt_compressed = serialize_bwt_compressed(bp)?;
+    let bwt_decompressed_len = bp.get_fm_index().map(|f| f.len()).unwrap_or(0);
 
-    // 4. Serialize SA uncompressed (u32 per entry)
-    let sa_uncomp = serialize_sa_uncompressed(bp)?;
+    // 4. Serialize SA with delta + VLI compression
+    let sa_compressed = serialize_sa_compressed(bp)?;
 
     // 5. Build section table (4 sections: BWT_UNCOMP, SA_UNCOMP, FM_INDEX, GENOMES)
     let mut section_table = Vec::new();
@@ -90,21 +241,21 @@ pub fn save_bitpop(bp: &BitPop, path: &str) -> IoResult<()> {
         &mut section_table,
         &SECTION_BWT_UNCOMP,
         offset,
-        bwt_uncomp.len() as u64,
-        bwt_uncomp.len() as u64,
+        bwt_compressed.len() as u64,
+        bwt_decompressed_len as u64,
         0,
     );
-    offset += bwt_uncomp.len() as u64;
+    offset += bwt_compressed.len() as u64;
 
     write_section_header(
         &mut section_table,
         &SECTION_SA_UNCOMP,
         offset,
-        sa_uncomp.len() as u64,
-        sa_uncomp.len() as u64,
+        sa_compressed.len() as u64,
+        sa_compressed.len() as u64,
         0,
     );
-    offset += sa_uncomp.len() as u64;
+    offset += sa_compressed.len() as u64;
 
     write_section_header(
         &mut section_table,
@@ -124,17 +275,50 @@ pub fn save_bitpop(bp: &BitPop, path: &str) -> IoResult<()> {
         genomes_data.len() as u64,
         0,
     );
+    offset += genomes_compressed.len() as u64;
+
+    // 5b. Spaced seed section (optional - only if spaced_seed_hash exists)
+    let spaced_seed_data = serialize_spaced_seed(bp);
+    let spaced_seed_compressed = zstd::encode_all(spaced_seed_data.as_slice(), 3)
+        .map_err(|e| std::io::Error::other(format!("zstd spaced seed compress failed: {}", e)))?;
+
+    write_section_header(
+        &mut section_table,
+        &SECTION_SPACED_SEED,
+        offset,
+        spaced_seed_compressed.len() as u64,
+        spaced_seed_data.len() as u64,
+        0,
+    );
+    offset += spaced_seed_compressed.len() as u64;
+
+    // 5c. HF profiles section (optional - only if hf_profiles exist)
+    let hf_data = serialize_hf(bp);
+    let hf_compressed = zstd::encode_all(hf_data.as_slice(), 3)
+        .map_err(|e| std::io::Error::other(format!("zstd hf compress failed: {}", e)))?;
+
+    write_section_header(
+        &mut section_table,
+        &SECTION_HF,
+        offset,
+        hf_compressed.len() as u64,
+        hf_data.len() as u64,
+        0,
+    );
+    offset += hf_compressed.len() as u64;
 
     // 6. Assemble file: header + section_table + sections
-    let mut all_data = Vec::with_capacity((offset + genomes_compressed.len() as u64 + 32) as usize);
+    let mut all_data = Vec::with_capacity((offset + hf_compressed.len() as u64 + 32) as usize);
 
     let header_placeholder = vec![0u8; HEADER_SIZE];
     all_data.extend_from_slice(&header_placeholder);
     all_data.extend_from_slice(&section_table);
-    all_data.extend_from_slice(&bwt_uncomp);
-    all_data.extend_from_slice(&sa_uncomp);
+    all_data.extend_from_slice(&bwt_compressed);
+    all_data.extend_from_slice(&sa_compressed);
     all_data.extend_from_slice(&fm_compressed);
     all_data.extend_from_slice(&genomes_compressed);
+    all_data.extend_from_slice(&spaced_seed_compressed);
+    all_data.extend_from_slice(&hf_compressed);
 
     // 7. Fill in header
     let header = FileHeader::new(bp.k(), bp.genome_count());
@@ -265,9 +449,9 @@ fn serialize_genomes(bp: &BitPop) -> IoResult<Vec<u8>> {
     Ok(data)
 }
 
-/// Serialize BWT in uncompressed raw format for direct memmap.
-/// Format: [bwt_len: u64][bwt_bytes: u8 x bwt_len, one 2-bit value per byte]
-fn serialize_bwt_uncompressed(bp: &BitPop) -> IoResult<Vec<u8>> {
+/// Serialize BWT using zstd compression.
+/// Format: [bwt_len: u64][comp_size: u64][zstd_data]
+fn serialize_bwt_compressed(bp: &BitPop) -> IoResult<Vec<u8>> {
     let fm = match bp.get_fm_index() {
         Some(fm) => fm,
         None => {
@@ -279,22 +463,28 @@ fn serialize_bwt_uncompressed(bp: &BitPop) -> IoResult<Vec<u8>> {
     };
 
     let bwt_len = fm.len();
-    let mut data = Vec::new();
-
-    // Length header
-    data.extend_from_slice(&(bwt_len as u64).to_le_bytes());
+    let mut raw = Vec::with_capacity(bwt_len);
 
     // BWT as raw bytes (one value per byte, values 0-4)
     for i in 0..bwt_len {
-        data.push(fm.bwt_at(i));
+        raw.push(fm.bwt_at(i));
     }
+
+    // zstd compress
+    let compressed = zstd::encode_all(raw.as_slice(), 3)
+        .map_err(|e| std::io::Error::other(format!("zstd BWT compress failed: {}", e)))?;
+
+    let mut data = Vec::new();
+    data.extend_from_slice(&(bwt_len as u64).to_le_bytes());
+    data.extend_from_slice(&(compressed.len() as u64).to_le_bytes());
+    data.extend_from_slice(&compressed);
 
     Ok(data)
 }
 
-/// Serialize SA in uncompressed u32 format for direct memmap.
-/// Format: [sa_len: u64][sa_entries: u32 x sa_len]
-fn serialize_sa_uncompressed(bp: &BitPop) -> IoResult<Vec<u8>> {
+/// Serialize SA using zstd compression.
+/// Format: [sa_len: u64][zstd_compressed_sa_data]
+fn serialize_sa_compressed(bp: &BitPop) -> IoResult<Vec<u8>> {
     let fm = match bp.get_fm_index() {
         Some(fm) => fm,
         None => {
@@ -306,15 +496,21 @@ fn serialize_sa_uncompressed(bp: &BitPop) -> IoResult<Vec<u8>> {
     };
 
     let sa_len = fm.sa_len();
-    let mut data = Vec::new();
-
-    // Length header
-    data.extend_from_slice(&(sa_len as u64).to_le_bytes());
+    let mut raw = Vec::new();
 
     // SA entries as u32
     for rank in 0..sa_len {
-        data.extend_from_slice(&(fm.sa_at(rank) as u32).to_le_bytes());
+        raw.extend_from_slice(&(fm.sa_at(rank) as u32).to_le_bytes());
     }
+
+    // zstd compress
+    let compressed = zstd::encode_all(raw.as_slice(), 3)
+        .map_err(|e| std::io::Error::other(format!("zstd SA compress failed: {}", e)))?;
+
+    let mut data = Vec::new();
+    data.extend_from_slice(&(sa_len as u64).to_le_bytes());
+    data.extend_from_slice(&(compressed.len() as u64).to_le_bytes());
+    data.extend_from_slice(&compressed);
 
     Ok(data)
 }
@@ -343,10 +539,10 @@ pub fn load_header(path: &str) -> IoResult<(usize, usize)> {
     }
 
     let version = u32::from_le_bytes(mmap[4..8].try_into().unwrap());
-    if version != VERSION {
+    if !(5..=VERSION).contains(&version) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("Unsupported version: {} (expected {})", version, VERSION),
+            format!("Unsupported version: {} (expected 5-{})", version, VERSION),
         ));
     }
 
@@ -406,13 +602,9 @@ pub fn load_bitpop(path: &str) -> IoResult<BitPop> {
     }
 
     // Parse all section headers
-    let num_sections = if version >= VERSION {
-        NUM_SECTIONS_V5
-    } else {
-        2
-    };
+    let num_sections = if version >= 5 { NUM_SECTIONS_V5 } else { 2 };
 
-    let mut sections: [Option<SectionInfo>; 4] = [None, None, None, None];
+    let mut sections: [Option<SectionInfo>; 6] = [None, None, None, None, None, None];
 
     for i in 0..num_sections {
         let offset = HEADER_SIZE + (i * SECTION_HEADER_SIZE);
@@ -426,6 +618,10 @@ pub fn load_bitpop(path: &str) -> IoResult<BitPop> {
             sections[2] = Some(section);
         } else if section.name == SECTION_GENOMES {
             sections[3] = Some(section);
+        } else if section.name == SECTION_SPACED_SEED {
+            sections[4] = Some(section);
+        } else if section.name == SECTION_HF {
+            sections[5] = Some(section);
         }
     }
 
@@ -443,8 +639,8 @@ pub fn load_bitpop(path: &str) -> IoResult<BitPop> {
     let (genomes_map, genome_names_map) =
         parse_genomes_from_bytes(&genomes_decompressed, num_genomes)?;
 
-    // Build FM-Index using v5 (uncompressed memmap) or v4 (decompressed) approach
-    if version >= VERSION {
+    // Build FM-Index using v5/v6 (uncompressed memmap) or v4 (decompressed) approach
+    if version >= 5 {
         // V5+ format: use uncompressed BWT/SA from memmap directly
         let bwt_section = sections[0].as_ref().ok_or_else(|| {
             std::io::Error::new(
@@ -575,12 +771,31 @@ pub fn load_bitpop(path: &str) -> IoResult<BitPop> {
         let fm_index =
             FmIndex::from_components(bwt, sa, c_array, occ, genome_boundaries, num_genomes);
 
-        Ok(BitPop::from_fm_index(
-            k,
-            genomes_map,
-            genome_names_map,
-            fm_index,
-        ))
+        let mut bp = BitPop::from_fm_index(k, genomes_map, genome_names_map, fm_index);
+
+        // Load spaced seed section if present
+        if let Some(spaced_section) = &sections[4] {
+            let sp_start = spaced_section.offset as usize;
+            let sp_end = sp_start + spaced_section.compressed_size as usize;
+            let sp_compressed = &mmap[sp_start..sp_end];
+            let sp_data = zstd::decode_all(sp_compressed).map_err(|e| {
+                std::io::Error::other(format!("Spaced seed decompression failed: {}", e))
+            })?;
+            deserialize_spaced_seed(&sp_data, &mut bp);
+        }
+
+        // Load HF profiles section if present
+        if let Some(hf_section) = &sections[5] {
+            let hf_start = hf_section.offset as usize;
+            let hf_end = hf_start + hf_section.compressed_size as usize;
+            let hf_compressed = &mmap[hf_start..hf_end];
+            let hf_data = zstd::decode_all(hf_compressed).map_err(|e| {
+                std::io::Error::other(format!("HF profiles decompression failed: {}", e))
+            })?;
+            deserialize_hf_profiles(&hf_data, &mut bp);
+        }
+
+        Ok(bp)
     } else {
         // V4 format: decompress FM_INDEX section (original behavior)
         let fm_section = sections[2].as_ref().ok_or_else(|| {
@@ -760,7 +975,7 @@ fn parse_section_header(mmap: &Mmap, offset: usize) -> IoResult<SectionInfo> {
 /// Load BWT directly from memmapped v5 format (no decompression).
 fn load_bwt_from_mmap(mmap: &Mmap, section: &SectionInfo) -> IoResult<Vec<u8>> {
     let start = section.offset as usize;
-    let end = start + section.compressed_size as usize; // compressed_size == uncompressed size for v5 BWT
+    let end = start + section.compressed_size as usize;
     let data = &mmap[start..end];
 
     if data.len() < 8 {
@@ -772,21 +987,66 @@ fn load_bwt_from_mmap(mmap: &Mmap, section: &SectionInfo) -> IoResult<Vec<u8>> {
 
     let bwt_len = u64::from_le_bytes(data[0..8].try_into().unwrap()) as usize;
 
-    if 8 + bwt_len > data.len() {
+    // Detect v5 (raw) vs v7 (compressed) format using section header
+    // v5: decompressed_size == compressed_size == 8 + bwt_len (raw data, no compression)
+    // v7: decompressed_size == bwt_len (actual BWT length, NOT including 8-byte header)
+    let is_v7 = section.decompressed_size == bwt_len as u64;
+
+    if is_v7 {
+        load_bwt_zstd(data, bwt_len)
+    } else {
+        // v5 backward compatibility - raw bytes
+        let expected_size = 8 + bwt_len;
+        if data.len() < expected_size {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "BWT data truncated",
+            ));
+        }
+        let bwt_bytes = &data[8..expected_size];
+        Ok(bwt_bytes.to_vec())
+    }
+}
+
+/// Load zstd-compressed BWT from v7 format.
+fn load_bwt_zstd(data: &[u8], bwt_len: usize) -> IoResult<Vec<u8>> {
+    if data.len() < 16 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "BWT data truncated",
+            "BWT data too short for header",
         ));
     }
 
-    let bwt_bytes = &data[8..8 + bwt_len];
-    Ok(bwt_bytes.to_vec())
+    let comp_size = u64::from_le_bytes(data[8..16].try_into().unwrap()) as usize;
+    if 16 + comp_size > data.len() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "BWT compressed data truncated",
+        ));
+    }
+    let compressed = &data[16..16 + comp_size];
+
+    let raw = zstd::decode_all(compressed)
+        .map_err(|e| std::io::Error::other(format!("zstd BWT decompress failed: {}", e)))?;
+
+    if raw.len() != bwt_len {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "BWT decompressed size {} != expected {}",
+                raw.len(),
+                bwt_len
+            ),
+        ));
+    }
+
+    Ok(raw)
 }
 
 /// Load SA directly from memmapped v5 format (no decompression).
 fn load_sa_from_mmap(mmap: &Mmap, section: &SectionInfo) -> IoResult<Vec<usize>> {
     let start = section.offset as usize;
-    let end = start + section.compressed_size as usize; // compressed_size == uncompressed size for v5 SA
+    let end = start + section.compressed_size as usize;
 
     if end > mmap.len() {
         return Err(std::io::Error::new(
@@ -811,7 +1071,7 @@ fn load_sa_from_mmap(mmap: &Mmap, section: &SectionInfo) -> IoResult<Vec<usize>>
 
     let sa_len_u64 = u64::from_le_bytes(data[0..8].try_into().unwrap());
 
-    // Sanity check: SA length should not exceed file size / 4
+    // Sanity check
     if sa_len_u64 > (mmap.len() as u64) / 4 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -824,26 +1084,62 @@ fn load_sa_from_mmap(mmap: &Mmap, section: &SectionInfo) -> IoResult<Vec<usize>>
     }
 
     let sa_len = sa_len_u64 as usize;
-    let data_start = 8;
-    let expected_size = data_start + (sa_len * 4);
+    if sa_len == 0 {
+        return Ok(Vec::new());
+    }
 
-    if expected_size > data.len() {
+    // Check if this is v6 compressed format or v5 raw format
+    // v6: [sa_len: u64][comp_size: u64][zstd_data]
+    // v5: [sa_len: u64][sa_entries: u32 x sa_len]
+    let expected_v5_size = 8 + (sa_len * 4);
+    let is_v6 = data.len() < expected_v5_size;
+
+    if is_v6 {
+        // Compressed format (v6)
+        load_sa_zstd(data, sa_len)
+    } else {
+        // Uncompressed format (v5 backward compatibility)
+        let mut sa = Vec::with_capacity(sa_len);
+        for i in 0..sa_len {
+            let byte_offset = 8 + (i * 4);
+            sa.push(
+                u32::from_le_bytes(data[byte_offset..byte_offset + 4].try_into().unwrap()) as usize,
+            );
+        }
+        Ok(sa)
+    }
+}
+
+/// Load zstd-compressed SA from v6 format.
+fn load_sa_zstd(data: &[u8], sa_len: usize) -> IoResult<Vec<usize>> {
+    if data.len() < 16 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "SA data too short for header",
+        ));
+    }
+
+    let comp_size = u64::from_le_bytes(data[8..16].try_into().unwrap()) as usize;
+    let compressed = &data[16..16 + comp_size];
+
+    let raw = zstd::decode_all(compressed)
+        .map_err(|e| std::io::Error::other(format!("zstd SA decompress failed: {}", e)))?;
+
+    if raw.len() != sa_len * 4 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!(
-                "SA data truncated: need {} bytes, have {}",
-                expected_size,
-                data.len()
+                "SA decompressed size {} != expected {}",
+                raw.len(),
+                sa_len * 4
             ),
         ));
     }
 
     let mut sa = Vec::with_capacity(sa_len);
     for i in 0..sa_len {
-        let byte_offset = data_start + (i * 4);
-        sa.push(
-            u32::from_le_bytes(data[byte_offset..byte_offset + 4].try_into().unwrap()) as usize,
-        );
+        let off = i * 4;
+        sa.push(u32::from_le_bytes(raw[off..off + 4].try_into().unwrap()) as usize);
     }
 
     Ok(sa)
@@ -1160,6 +1456,15 @@ pub fn load_bitpop_auto(path: &str) -> IoResult<BitPop> {
     load_legacy_bitpop(path)
 }
 
+/// Compute SHA256 hash of data.
+#[allow(dead_code)]
+fn sha256(data: &[u8]) -> [u8; 32] {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(data);
+    hasher.finalize().into()
+}
+
 // --- Tests ---
 
 #[cfg(test)]
@@ -1428,13 +1733,4 @@ mod tests {
 
         let _ = std::fs::remove_file(path_str);
     }
-}
-
-/// Compute SHA256 hash of data.
-#[allow(dead_code)]
-fn sha256(data: &[u8]) -> [u8; 32] {
-    use sha2::Digest;
-    let mut hasher = sha2::Sha256::new();
-    hasher.update(data);
-    hasher.finalize().into()
 }

@@ -1,9 +1,14 @@
+use bit_pop::MappingResult;
 use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use bit_pop::cache::CacheManager;
+use bit_pop::chunk_consensus::MultiChunkConsensus;
+use bit_pop::consensus::MultiKConsensus;
 use bit_pop::fastq::{parse_reads, ReadsFormat};
 use bit_pop::ncbi::{NcbiClient, NcbiConfig};
 use bit_pop::{AlignMode, BitPop, FuzzyMethod};
@@ -23,6 +28,10 @@ fn extract_cami_genome_name(basename: &str) -> String {
     } else {
         basename.to_string()
     }
+}
+
+fn extract_pacbio_genome_name(basename: &str) -> String {
+    basename.to_string()
 }
 
 #[derive(Parser)]
@@ -57,6 +66,15 @@ enum Commands {
 
     /// Apply EM algorithm for soft-assignment classification
     Em(EmArgs),
+
+    /// Multi-k consensus: map reads against multiple k-indexes with voting
+    Consensus(ConsensusArgs),
+
+    /// Multi chunk-% consensus: same index, different chunk sizes, voting
+    ChunkConsensus(ChunkConsensusArgs),
+
+    /// Generate taxonomic classification report from SAM output
+    Tax(TaxArgs),
 }
 
 #[derive(clap::Args)]
@@ -100,6 +118,10 @@ struct RunArgs {
     #[arg(short = 's', long)]
     spaced_seed: bool,
 
+    /// Custom spaced seed pattern (e.g., "11101001110111" for 10/14). Default: "11111011111111" (13/14)
+    #[arg(long, requires = "spaced_seed")]
+    spaced_seed_pattern: Option<String>,
+
     /// Fuzzy k-mer matching method: none, fuzzy-kmer, fuzzy-seed, neighborhood
     #[arg(long, default_value = "none")]
     method: String,
@@ -111,6 +133,10 @@ struct RunArgs {
     /// Read type: short (Illumina, k=10) or long (Nanopore/PacBio, auto k)
     #[arg(long, default_value = "short")]
     read_type: String,
+
+    /// Use golden anchor selection (quality-weighted k-mer anchors for long reads)
+    #[arg(long)]
+    golden_anchors: bool,
 
     /// Alignment mode: xor (fast), sw (accurate), hybrid (balanced)
     #[arg(short, long, default_value = "hybrid")]
@@ -152,6 +178,66 @@ struct RunArgs {
     /// Apply EM algorithm for soft-assignment classification (improves strain resolution)
     #[arg(long)]
     em: bool,
+
+    /// Search radius in bp (±N around anchor position, default: 5, max: 200)
+    #[arg(long, default_value = "5")]
+    search_radius: isize,
+
+    /// Chunk size for PacBio long-read mapping (0 = auto-detect, 150 recommended)
+    /// Reads >1000bp are split into chunks for improved mapping rate
+    #[arg(long)]
+    chunk_size: Option<usize>,
+
+    /// Chunk size as percentage of read length (0.0-1.0, e.g. 0.01 = 1%).
+    /// Overrides --chunk-size when set. Enables dynamic per-read chunk sizing.
+    /// Clamped to [chunk_min, chunk_max] range (default: 50-200bp).
+    #[arg(long)]
+    chunk_pct: Option<f64>,
+
+    /// Minimum chunk size clamp for dynamic chunking (overrides default 50bp).
+    #[arg(long)]
+    chunk_min: Option<usize>,
+
+    /// Maximum chunk size clamp for dynamic chunking (overrides default 200bp).
+    #[arg(long)]
+    chunk_max: Option<usize>,
+
+    /// Minimum fraction of chunks that must agree (0.0-1.0, default: 0.0 = no threshold).
+    /// Example: 0.6 requires 60% of chunks to agree before accepting a mapping.
+    #[arg(long)]
+    chunk_vote_threshold: Option<f64>,
+
+    /// Number of top genomes to return per read in chunk-based mode (default: 1).
+    /// Use 2-3 for multi-genome uncertainty scenarios.
+    #[arg(long)]
+    chunk_top_n: Option<usize>,
+
+    /// Anchor strategy for chunk-based mapping: rarest (default), golden (quality-weighted), spaced (spaced seed)
+    #[arg(long, default_value = "rarest")]
+    chunk_strategy: String,
+
+    /// Enable SNP-aware scoring for strain resolution.
+    /// Collects mismatches across all reads, builds a SNP map, and boosts
+    /// scores for genomes with known strain-specific SNPs.
+    #[arg(long)]
+    snp_detect: bool,
+
+    /// Minimum support count for SNP detection (default: 3).
+    /// A position must have this many reads supporting the same mismatch to be considered a SNP.
+    #[arg(long, default_value = "3")]
+    snp_min_support: u32,
+
+    /// Enable homopolymer fingerprint scoring for strain resolution
+    #[arg(long)]
+    hf: bool,
+
+    /// Minimum run length for homopolymer fingerprint (default: 3)
+    #[arg(long, default_value = "3")]
+    hf_min: usize,
+
+    /// Output BAM format instead of SAM
+    #[arg(long)]
+    bam: bool,
 }
 
 #[derive(clap::Args)]
@@ -196,6 +282,30 @@ struct BuildArgs {
     /// Use CAMI mode: extract genome name from filename (e.g., 1036554.gt1kb.fasta -> 1036554)
     #[arg(long)]
     cami: bool,
+
+    /// Use PacBio mode: extract genome name from filename (e.g., A_baumannii_AYE_bc2001.fa -> A_baumannii_AYE_bc2001)
+    #[arg(long)]
+    pacbio: bool,
+
+    /// Enable spaced seed pattern for k-mer matching (builds spaced seed hash index)
+    #[arg(long)]
+    spaced_seed: bool,
+
+    /// Custom spaced seed pattern (e.g., "11101001110111" for 10/14). Default: "11111011111111" (13/14)
+    #[arg(long, requires = "spaced_seed")]
+    spaced_seed_pattern: Option<String>,
+
+    /// Search radius in bp (±N around anchor position, default: 5, max: 200)
+    #[arg(long, default_value = "5")]
+    search_radius: isize,
+
+    /// Enable homopolymer fingerprint scoring for strain resolution
+    #[arg(long)]
+    hf: bool,
+
+    /// Minimum run length for homopolymer fingerprint (default: 3)
+    #[arg(long, default_value = "3")]
+    hf_min: usize,
 }
 
 #[derive(clap::Args)]
@@ -251,6 +361,94 @@ struct MapArgs {
     /// Apply EM algorithm for soft-assignment classification (improves strain resolution)
     #[arg(long)]
     em: bool,
+
+    /// Search radius in bp (±N around anchor position, default: 5, max: 200)
+    #[arg(long, default_value = "5")]
+    search_radius: isize,
+
+    /// Enable spaced seed matching (uses spaced seed hash index if available)
+    #[arg(long)]
+    spaced_seed: bool,
+
+    /// Custom spaced seed pattern (e.g., "11101001110111" for 10/14). Default: "11111011111111" (13/14)
+    #[arg(long, requires = "spaced_seed")]
+    spaced_seed_pattern: Option<String>,
+
+    /// Use golden anchor selection (quality-weighted k-mer anchors for long reads)
+    #[arg(long)]
+    golden_anchors: bool,
+
+    /// Chunk size for PacBio long-read mapping (0 = auto-detect, 150 recommended)
+    #[arg(long)]
+    chunk_size: Option<usize>,
+
+    /// Chunk size as percentage of read length (0.0-1.0, e.g. 0.01 = 1%).
+    /// Overrides --chunk-size when set. Enables dynamic per-read chunk sizing.
+    /// Clamped to [chunk_min, chunk_max] range (default: 50-200bp).
+    #[arg(long)]
+    chunk_pct: Option<f64>,
+
+    /// Minimum chunk size clamp for dynamic chunking (overrides default 50bp).
+    #[arg(long)]
+    chunk_min: Option<usize>,
+
+    /// Maximum chunk size clamp for dynamic chunking (overrides default 200bp).
+    #[arg(long)]
+    chunk_max: Option<usize>,
+
+    /// Minimum fraction of chunks that must agree (0.0-1.0, default: 0.0 = no threshold).
+    /// Example: 0.6 requires 60% of chunks to agree before accepting a mapping.
+    #[arg(long)]
+    chunk_vote_threshold: Option<f64>,
+
+    /// Number of top genomes to return per read in chunk-based mode (default: 1).
+    /// Use 2-3 for multi-genome uncertainty scenarios.
+    #[arg(long)]
+    chunk_top_n: Option<usize>,
+
+    /// Anchor strategy for chunk-based mapping: rarest (default), golden (quality-weighted), spaced (spaced seed)
+    #[arg(long, default_value = "rarest")]
+    chunk_strategy: String,
+
+    /// Enable SNP-aware scoring for strain resolution.
+    #[arg(long)]
+    snp_detect: bool,
+
+    /// Minimum support count for SNP detection (default: 3).
+    #[arg(long, default_value = "3")]
+    snp_min_support: u32,
+
+    /// Enable homopolymer fingerprint scoring for strain resolution
+    #[arg(long)]
+    hf: bool,
+
+    /// Minimum run length for homopolymer fingerprint (default: 3)
+    #[arg(long, default_value = "3")]
+    hf_min: usize,
+
+    /// Output BAM format instead of SAM
+    #[arg(long)]
+    bam: bool,
+
+    /// Stream reads in chunks (limits memory usage for large FASTQ files)
+    #[arg(long)]
+    stream: bool,
+
+    /// Max RAM to use for streaming (e.g., "32G", "16GB"). Auto-calculates chunk size.
+    #[arg(long)]
+    max_ram: Option<String>,
+
+    /// Diagnose unmapped reads (sample up to 1000, report why they failed)
+    #[arg(long)]
+    diagnose_unmapped: bool,
+
+    /// Two-pass mapping: re-map unmapped reads with lower threshold (default: 0.5)
+    #[arg(long)]
+    two_pass: bool,
+
+    /// Minimum score for second pass (default: 0.5)
+    #[arg(long, default_value = "0.5")]
+    second_pass_score: f64,
 }
 
 #[derive(clap::Args)]
@@ -404,6 +602,175 @@ struct EmArgs {
     confidence_threshold: f64,
 }
 
+#[derive(clap::Args)]
+struct ConsensusArgs {
+    /// List of index:k pairs (comma-separated), e.g. "index_k10.bitpop:10,index_k20.bitpop:20,index_k50.bitpop:50"
+    #[arg(short, long, required = true, num_args = 1..)]
+    indexes: Vec<String>,
+
+    /// Reads file (FASTQ)
+    #[arg(short, long, required = true)]
+    reads: PathBuf,
+
+    /// Output SAM file
+    #[arg(short, long, required = true)]
+    output: PathBuf,
+
+    /// Strategy: weighted_score (default), majority, best_score (union - best from any k)
+    #[arg(long, default_value = "weighted_score")]
+    strategy: String,
+
+    /// Minimum alignment score threshold (0.0-1.0, 0 = no filter)
+    #[arg(long, default_value = "0.0")]
+    min_score: f64,
+
+    /// Chunk size for long reads (0 = no chunking)
+    #[arg(long, default_value = "0")]
+    chunk_size: usize,
+
+    /// Chunk size as percentage of read length (0.0-1.0, 0 = disabled)
+    #[arg(long, default_value = "0.0")]
+    chunk_pct: f64,
+
+    /// Minimum chunk size in bp
+    #[arg(long, default_value = "50")]
+    chunk_min: usize,
+
+    /// Maximum chunk size in bp
+    #[arg(long, default_value = "200")]
+    chunk_max: usize,
+
+    /// Enable SNP detection
+    #[arg(long)]
+    snp_detect: bool,
+
+    /// SNP minimum support count
+    #[arg(long, default_value = "3")]
+    snp_min_support: u32,
+
+    /// SNP penalty value
+    #[arg(long, default_value = "0.1")]
+    snp_penalty: f64,
+
+    /// Minimum k-values that must find a mapping (0 = any, default: 1)
+    #[arg(long, default_value = "1")]
+    min_k_mappings: usize,
+
+    /// Number of threads
+    #[arg(short = 't', long, default_value = "1")]
+    threads: usize,
+
+    /// Number of top candidates to output per read (0 = only winner, default: 1)
+    #[arg(long, default_value = "1")]
+    top_n: usize,
+
+    /// Output BAM format instead of SAM
+    #[arg(long)]
+    bam: bool,
+
+    /// Stream reads in chunks (limits memory usage)
+    #[arg(long)]
+    stream: bool,
+
+    /// Max RAM to use for streaming (e.g., "32G", "16G"). Auto-calculates chunk size.
+    #[arg(long)]
+    max_ram: Option<String>,
+
+    /// Two-pass mode: map each k separately (faster, like Python script)
+    #[arg(long)]
+    two_pass: bool,
+
+    /// Base mode: use same parallel mapping as standalone `map` command
+    #[arg(long)]
+    base: bool,
+}
+
+#[derive(clap::Args)]
+struct ChunkConsensusArgs {
+    /// Index file (.bitpop)
+    #[arg(short, long, required = true)]
+    index: PathBuf,
+
+    /// Reads file (FASTQ)
+    #[arg(short, long, required = true)]
+    reads: PathBuf,
+
+    /// Output SAM file
+    #[arg(short, long, required = true)]
+    output: PathBuf,
+
+    /// Chunk percentages as fraction of read length, comma-separated (e.g. "0.01,0.10,0.50")
+    #[arg(short = 'c', long, required = true)]
+    chunk_pcts: String,
+
+    /// Voting strategy: majority (default), weighted_score
+    #[arg(long, default_value = "majority")]
+    strategy: String,
+
+    /// Minimum alignment score threshold (0.0-1.0)
+    #[arg(long, default_value = "0.5")]
+    min_score: f64,
+
+    /// Minimum configs that must agree (default: majority = N/2 + 1)
+    #[arg(long)]
+    min_agreement: Option<usize>,
+
+    /// Minimum chunk size in bp (default: 50)
+    #[arg(long, default_value = "50")]
+    chunk_min: usize,
+
+    /// Maximum chunk size in bp (default: 200)
+    #[arg(long, default_value = "200")]
+    chunk_max: usize,
+
+    /// Number of threads
+    #[arg(short = 't', long, default_value = "1")]
+    threads: usize,
+
+    /// Number of top candidates per read (default: 1)
+    #[arg(long, default_value = "1")]
+    top_n: usize,
+
+    /// Output BAM format instead of SAM
+    #[arg(long)]
+    bam: bool,
+
+    /// Stream reads in chunks (limits memory usage for large FASTQ files)
+    #[arg(long)]
+    stream: bool,
+
+    /// Max RAM to use for streaming (e.g., "32G", "16GB"). Auto-calculates chunk size.
+    #[arg(long)]
+    max_ram: Option<String>,
+}
+
+#[derive(clap::Args)]
+struct TaxArgs {
+    /// Input SAM file (bit-pop mapping output)
+    #[arg(short, long, required = true)]
+    input: PathBuf,
+
+    /// Path to NCBI nodes.dmp file
+    #[arg(long, required = true)]
+    nodes_dmp: PathBuf,
+
+    /// Path to NCBI names.dmp file
+    #[arg(long, required = true)]
+    names_dmp: PathBuf,
+
+    /// Output file for taxonomic report (default: stdout)
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+
+    /// Number of top entries per rank to display (default: 10)
+    #[arg(long, default_value = "10")]
+    top_n: usize,
+
+    /// Output format: text, json
+    #[arg(long, default_value = "text")]
+    format: String,
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -436,16 +803,67 @@ async fn main() {
             cmd_em(&args);
             Ok(())
         }
+        Commands::Consensus(args) => {
+            cmd_consensus(&args);
+            Ok(())
+        }
+        Commands::ChunkConsensus(args) => {
+            cmd_chunk_consensus(&args);
+            Ok(())
+        }
+        Commands::Tax(args) => {
+            cmd_tax(&args);
+            Ok(())
+        }
     } {
         eprintln!("Error: {}", e);
         std::process::exit(1);
     }
 }
 
+fn expand_genome_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut expanded = Vec::new();
+    for path in paths {
+        if path.is_dir() {
+            match std::fs::read_dir(path) {
+                Ok(entries) => {
+                    let files: Vec<_> = entries
+                        .filter_map(|e| e.ok())
+                        .map(|e| e.path())
+                        .filter(|p| {
+                            p.extension()
+                                .map(|e| e == "fna" || e == "fasta" || e == "fa")
+                                .unwrap_or(false)
+                        })
+                        .collect();
+                    println!(
+                        "  Found {} genome file(s) in {}",
+                        files.len(),
+                        path.display()
+                    );
+                    expanded.extend(files);
+                }
+                Err(e) => {
+                    eprintln!("Cannot read directory {}: {}", path.display(), e);
+                }
+            }
+        } else {
+            expanded.push(path.clone());
+        }
+    }
+    expanded
+}
+
 fn cmd_build(args: &BuildArgs, verbose: bool) {
     let start = Instant::now();
 
     println!("Building FM-Index...");
+
+    let fasta_paths = expand_genome_paths(&args.fasta);
+    if fasta_paths.is_empty() {
+        eprintln!("No genome files found.");
+        std::process::exit(1);
+    }
 
     let mut bp = BitPop::new(args.k);
     bp.set_auto_k(args.auto_k);
@@ -467,16 +885,45 @@ fn cmd_build(args: &BuildArgs, verbose: bool) {
             );
         }
     }
+
+    if args.spaced_seed {
+        bp.set_spaced_seed(true);
+        if let Some(pattern) = &args.spaced_seed_pattern {
+            bp.set_spaced_seed_pattern(pattern);
+            if verbose {
+                println!("  Spaced seed pattern: {}", pattern);
+            }
+        }
+        if verbose {
+            println!(
+                "  Spaced seed: enabled (pattern: {})",
+                bp.spaced_seed_pattern()
+            );
+        }
+    }
+
+    if args.hf {
+        bp.set_hf(true);
+        bp.set_hf_min_run(args.hf_min);
+        if verbose {
+            println!(
+                "  Homopolymer fingerprint: enabled (min_run: {})",
+                args.hf_min
+            );
+        }
+    }
+
+    bp.set_search_radius(args.search_radius);
     let mut total_bases: usize = 0;
 
-    let pb = ProgressBar::new(args.fasta.len() as u64);
+    let pb = ProgressBar::new(fasta_paths.len() as u64);
     pb.set_style(
         ProgressStyle::default_bar()
             .template("{spinner} {msg}: [{elapsed_precise} {bar:40} {pos}/{len}]")
             .unwrap(),
     );
 
-    for fasta_path in &args.fasta {
+    for fasta_path in &fasta_paths {
         let path_str = fasta_path.to_string_lossy().to_string();
         pb.set_message(format!("Loading: {}", path_str));
 
@@ -497,6 +944,33 @@ fn cmd_build(args: &BuildArgs, verbose: bool) {
                     let mut ids = Vec::new();
                     for (_header, seq) in sequences {
                         let gid = bp.add_genome(&cami_name, &seq);
+                        ids.push(gid);
+                    }
+                    ids
+                }
+                Err(e) => {
+                    pb.finish_with_message(format!("Error reading {}: {}", path_str, e));
+                    eprintln!("Error reading {}: {}", path_str, e);
+                    std::process::exit(1);
+                }
+            }
+        } else if args.pacbio {
+            let basename = fasta_path
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let pacbio_name = extract_pacbio_genome_name(&basename);
+
+            if verbose {
+                println!("  PacBio mode: {} -> {}", path_str, pacbio_name);
+            }
+
+            let seqs = bit_pop::fasta::read_all_sequences(&path_str);
+            match seqs {
+                Ok(sequences) => {
+                    let mut ids = Vec::new();
+                    for (_header, seq) in sequences {
+                        let gid = bp.add_genome(&pacbio_name, &seq);
                         ids.push(gid);
                     }
                     ids
@@ -571,6 +1045,282 @@ fn cmd_build(args: &BuildArgs, verbose: bool) {
     }
 }
 
+/// Second pass: re-map unmapped reads with lower threshold.
+fn cmd_map_second_pass(
+    bp: &BitPop,
+    reads_path: &str,
+    _output_path: &str,
+    chunk_size: usize,
+    _threads: usize,
+    align_mode: AlignMode,
+    min_score: f64,
+) -> usize {
+    use bit_pop::fastq::FastqChunkParser;
+
+    let total = match FastqChunkParser::count_reads(reads_path) {
+        Ok(n) => n,
+        Err(_) => return 0,
+    };
+
+    let mut parser = match FastqChunkParser::new(reads_path, chunk_size) {
+        Ok(p) => p,
+        Err(_) => return 0,
+    };
+
+    let pb = ProgressBar::new(total as u64);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner} 2nd pass: [{elapsed_precise} {bar:40}] {pos}/{len}")
+            .unwrap(),
+    );
+
+    let mut mapped = 0usize;
+
+    // Collect unmapped reads and re-map
+    while let Some(chunk) = parser.next_chunk().unwrap() {
+        for (_name, seq, _qual) in &chunk {
+            // First check if this read already mapped in first pass
+            let first_results = bp.map_read_with_mode(seq, align_mode, 50);
+            if !first_results.is_empty() {
+                pb.inc(1);
+                continue;
+            }
+
+            // Try with lower threshold
+            let second_results = bp.anchor_filter_with_mode(seq, align_mode, min_score, 100);
+            if !second_results.is_empty() {
+                mapped += 1;
+            }
+            pb.inc(1);
+        }
+    }
+
+    pb.finish_with_message(format!("2nd pass: {} reads mapped", mapped));
+    mapped
+}
+
+/// Configuration for stream mapping.
+struct StreamMapConfig {
+    reads_path: String,
+    output_path: String,
+    chunk_size: usize,
+    threads: usize,
+    align_mode: AlignMode,
+    golden_anchors: bool,
+    min_quality: u8,
+    write_bam: bool,
+    use_chunking: bool,
+    diagnose: bool,
+    second_pass_score: f64,
+}
+
+/// Stream map: process reads in chunks to limit memory usage.
+fn cmd_map_stream(bp: &BitPop, config: &StreamMapConfig) -> usize {
+    use bit_pop::fastq::FastqChunkParser;
+
+    let total = match FastqChunkParser::count_reads(&config.reads_path) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("Failed to count reads: {}", e);
+            std::process::exit(1);
+        }
+    };
+    println!(
+        "Total reads: {} (streaming, chunk={})",
+        total, config.chunk_size
+    );
+
+    let mut parser = match FastqChunkParser::new(&config.reads_path, config.chunk_size) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("Failed to open FASTQ: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let pb = ProgressBar::new(total as u64);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner} Mapping: [{elapsed_precise} {bar:40}] {pos}/{len} {msg}")
+            .unwrap(),
+    );
+
+    let mut mapped = 0usize;
+    let mut unmapped = 0usize;
+    let mut chunk_num = 0usize;
+    let mut processed = 0u64;
+
+    while let Some(chunk) = parser.next_chunk().unwrap() {
+        chunk_num += 1;
+        if chunk.is_empty() {
+            break;
+        }
+
+        let chunk_reads: Vec<(&str, &str)> = chunk
+            .iter()
+            .map(|(n, s, _)| (n.as_str(), s.as_str()))
+            .collect();
+        let chunk_start = processed;
+
+        let chunk_output = format!("{}_chunk{}.tmp", config.output_path, chunk_num);
+
+        if config.threads > 1 {
+            let pb_clone = pb.clone();
+            let result = if config.use_chunking {
+                bp.map_reads_with_chunking_parallel_with_progress(
+                    &chunk_reads,
+                    &chunk_output,
+                    50,
+                    move |completed, _total| {
+                        pb_clone.set_position(chunk_start + completed as u64);
+                    },
+                )
+                .unwrap_or(0)
+            } else {
+                bp.map_reads_parallel_with_progress(
+                    &chunk_reads,
+                    &chunk_output,
+                    50,
+                    if chunk.len() > 1000 { 100 } else { 10 },
+                    move |completed, _total| {
+                        pb_clone.set_position(chunk_start + completed as u64);
+                    },
+                )
+                .unwrap_or(0)
+            };
+            mapped += result;
+        } else {
+            for (_name, seq, qual) in &chunk {
+                let results = if config.golden_anchors {
+                    bp.map_read_with_golden_anchors(seq, qual, config.align_mode, 50)
+                } else {
+                    bp.map_read_with_quality_mode(
+                        seq,
+                        qual,
+                        config.align_mode,
+                        config.min_quality,
+                        50,
+                    )
+                };
+                if !results.is_empty() {
+                    mapped += 1;
+                } else {
+                    unmapped += 1;
+                }
+                processed += 1;
+                pb.set_position(processed);
+            }
+        }
+
+        println!("  Chunk {} done: {} reads", chunk_num, chunk.len());
+        drop(chunk);
+    }
+
+    pb.finish_with_message("Mapping complete");
+
+    // Two-pass: re-map unmapped with lower threshold
+    if unmapped > 0 {
+        println!(
+            "\nSecond pass: remapping {} unmapped reads with lower threshold",
+            unmapped
+        );
+        let second_mapped = cmd_map_second_pass(
+            bp,
+            &config.reads_path,
+            &config.output_path,
+            config.chunk_size,
+            config.threads,
+            config.align_mode,
+            config.second_pass_score,
+        );
+        mapped += second_mapped;
+        unmapped -= second_mapped;
+    }
+
+    // Diagnostic output
+    if config.diagnose && unmapped > 0 {
+        println!("\nUnmapped read diagnostics (sample: 1000 reads):");
+        let mut reasons: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        let mut sample_count = 0;
+
+        let mut parser = bit_pop::fastq::FastqChunkParser::new(&config.reads_path, 1000).unwrap();
+        while let Some(chunk) = parser.next_chunk().unwrap() {
+            for (_name, seq, _qual) in &chunk {
+                let results = bp.map_read_with_mode(seq, config.align_mode, 50);
+                if results.is_empty() {
+                    let reason = bp.diagnose_read(seq);
+                    *reasons.entry(reason).or_insert(0) += 1;
+                    sample_count += 1;
+                    if sample_count >= 1000 {
+                        break;
+                    }
+                }
+            }
+            if sample_count >= 1000 {
+                break;
+            }
+        }
+
+        let mut sorted: Vec<_> = reasons.iter().collect();
+        sorted.sort_by(|a, b| b.1.cmp(a.1));
+        for (reason, count) in sorted {
+            println!("  [{:5}] {}", count, reason);
+        }
+    }
+
+    // Merge chunk outputs
+    if chunk_num > 1 {
+        merge_sam_chunks(&config.output_path, chunk_num, config.write_bam);
+    } else if chunk_num == 1 {
+        let chunk_output = format!("{}_chunk1.tmp", config.output_path);
+        if std::path::Path::new(&chunk_output).exists() {
+            std::fs::rename(&chunk_output, &config.output_path).unwrap();
+        }
+    }
+
+    mapped
+}
+
+/// Merge SAM chunk files into final output.
+fn merge_sam_chunks(output_path: &str, num_chunks: usize, write_bam: bool) {
+    let mut lines: Vec<String> = Vec::new();
+    let mut header_done = false;
+
+    for i in 1..=num_chunks {
+        let chunk_path = format!("{}_chunk{}.tmp", output_path, i);
+        if let Ok(content) = std::fs::read_to_string(&chunk_path) {
+            for line in content.lines() {
+                if line.starts_with('@') {
+                    if !header_done || line.starts_with("@HD") {
+                        lines.push(line.to_string());
+                        if line.starts_with("@HD") {
+                            header_done = true;
+                        }
+                    }
+                } else {
+                    lines.push(line.to_string());
+                }
+            }
+        }
+        std::fs::remove_file(&chunk_path).ok();
+    }
+
+    if write_bam {
+        let temp_sam = format!("{}.tmp.sam", output_path);
+        std::fs::write(&temp_sam, lines.join("\n").as_str()).unwrap();
+        if let Ok(mut subprocess) = std::process::Command::new("samtools")
+            .args(["view", "-bS", &temp_sam, "-o", output_path])
+            .spawn()
+        {
+            subprocess.wait().ok();
+        }
+        std::fs::remove_file(&temp_sam).ok();
+    } else {
+        std::fs::write(output_path, lines.join("\n").as_str()).unwrap();
+    }
+}
+
 fn cmd_map(args: &MapArgs, verbose: bool) {
     let start = Instant::now();
 
@@ -606,13 +1356,103 @@ fn cmd_map(args: &MapArgs, verbose: bool) {
         }
     }
 
+    if args.spaced_seed {
+        bp.set_spaced_seed(true);
+        if let Some(pattern) = &args.spaced_seed_pattern {
+            bp.set_spaced_seed_pattern(pattern);
+            if verbose {
+                println!("  Spaced seed pattern: {}", pattern);
+            }
+        }
+        if verbose {
+            println!(
+                "  Spaced seed: enabled (pattern: {})",
+                bp.spaced_seed_pattern()
+            );
+        }
+    }
+
+    bp.set_search_radius(args.search_radius);
+
+    if let Some(chunk_size) = args.chunk_size {
+        bp.set_chunk_size(chunk_size);
+        println!("  Chunk size: {}bp (PacBio mode)", chunk_size);
+    }
+
+    if let Some(chunk_pct) = args.chunk_pct {
+        bp.set_chunk_pct(chunk_pct);
+    }
+
+    if let Some(chunk_min) = args.chunk_min {
+        bp.set_chunk_min(chunk_min);
+    }
+
+    if let Some(chunk_max) = args.chunk_max {
+        bp.set_chunk_max(chunk_max);
+    }
+
+    if bp.chunk_pct() > 0.0 {
+        println!(
+            "  Chunk pct: {:.2}% (dynamic, clamped {}-{}bp)",
+            bp.chunk_pct() * 100.0,
+            bp.chunk_min(),
+            bp.chunk_max()
+        );
+    }
+
+    if let Some(threshold) = args.chunk_vote_threshold {
+        bp.set_chunk_vote_threshold(threshold);
+        println!(
+            "  Chunk vote threshold: {:.0}% (requires {:.0}% chunk agreement)",
+            threshold * 100.0,
+            threshold * 100.0
+        );
+    }
+
+    if let Some(top_n) = args.chunk_top_n {
+        bp.set_chunk_top_n(top_n);
+        println!("  Chunk top-N: {} genomes per read", top_n);
+    }
+
+    let chunk_strategy = match args.chunk_strategy.as_str() {
+        "golden" => bit_pop::ChunkAnchorStrategy::Golden,
+        "spaced" => bit_pop::ChunkAnchorStrategy::Spaced,
+        _ => bit_pop::ChunkAnchorStrategy::Rarest,
+    };
+    bp.set_chunk_anchor_strategy(chunk_strategy);
+    if args.chunk_strategy != "rarest" {
+        println!("  Chunk strategy: {}", args.chunk_strategy);
+    }
+
+    if args.snp_detect {
+        bp.set_snp_detect(true);
+        bp.set_snp_min_support(args.snp_min_support);
+        println!(
+            "  SNP detection: enabled (min support: {}, penalty: {})",
+            args.snp_min_support,
+            bp.snp_penalty()
+        );
+    }
+
+    if args.hf {
+        bp.set_hf(true);
+        bp.set_hf_min_run(args.hf_min);
+        println!(
+            "  Homopolymer fingerprint: enabled (min_run: {})",
+            args.hf_min
+        );
+    }
+
     let load_time = load_start.elapsed();
 
     let align_mode = match args.align_mode.as_str() {
         "sw" => AlignMode::Sw,
         "hybrid" => AlignMode::Hybrid,
+        "softclip" => AlignMode::Softclip,
+        "chain" => AlignMode::Chain,
         _ => AlignMode::Xor,
     };
+    bp.set_align_mode(align_mode);
 
     println!(
         "Index loaded in {:.3}s ({})\n",
@@ -625,7 +1465,14 @@ fn cmd_map(args: &MapArgs, verbose: bool) {
 
     // Check for paired-end mode
     if let (Some(r1_path), Some(r2_path)) = (&args.reads_1, &args.reads_2) {
-        cmd_map_paired(&bp, r1_path, r2_path, &args.output, args.min_quality);
+        cmd_map_paired(
+            &bp,
+            r1_path,
+            r2_path,
+            &args.output,
+            args.min_quality,
+            args.bam,
+        );
         return;
     }
 
@@ -637,6 +1484,41 @@ fn cmd_map(args: &MapArgs, verbose: bool) {
             std::process::exit(1);
         }
     };
+
+    if args.stream {
+        let chunk_size = if let Some(ref max_ram) = args.max_ram {
+            parse_stream_chunk_size(&Some(max_ram.clone()))
+        } else {
+            20_000_000
+        };
+        println!("Streaming mode: chunk size = {} reads", chunk_size);
+
+        let map_start = Instant::now();
+        let mapped_count = cmd_map_stream(
+            &bp,
+            &StreamMapConfig {
+                reads_path,
+                output_path: args.output.to_str().unwrap().to_string(),
+                chunk_size,
+                threads: args.reads_threads,
+                align_mode,
+                golden_anchors: args.golden_anchors,
+                min_quality: args.min_quality,
+                write_bam: args.bam,
+                use_chunking: args.chunk_size.is_some() || args.chunk_pct.is_some(),
+                diagnose: args.diagnose_unmapped,
+                second_pass_score: args.second_pass_score,
+            },
+        );
+
+        let elapsed = start.elapsed();
+        println!("\nMapping complete: {} reads mapped", mapped_count);
+        println!("  Alignment mode: {}", align_mode);
+        println!("  Load time:  {:.3}s", load_time.as_secs_f64());
+        println!("  Map time:   {:.2}s", map_start.elapsed().as_secs_f64());
+        println!("  Total time: {:.2}s", elapsed.as_secs_f64());
+        return;
+    }
 
     let reads_format = match parse_reads(&reads_path) {
         Ok(format) => format,
@@ -720,13 +1602,17 @@ fn cmd_map(args: &MapArgs, verbose: bool) {
                     .iter()
                     .enumerate()
                     .map(|(i, (name, seq, qual))| {
-                        let results = bp.map_read_with_quality_mode(
-                            seq,
-                            qual,
-                            align_mode,
-                            args.min_quality,
-                            50,
-                        );
+                        let results = if args.golden_anchors {
+                            bp.map_read_with_golden_anchors(seq, qual, align_mode, 50)
+                        } else {
+                            bp.map_read_with_quality_mode(
+                                seq,
+                                qual,
+                                align_mode,
+                                args.min_quality,
+                                50,
+                            )
+                        };
                         if (i + 1) % 10 == 0 || i + 1 == total {
                             pb.set_position((i + 1) as u64);
                             pb.set_message(format!("{}/{} reads", i + 1, total));
@@ -790,11 +1676,12 @@ fn cmd_map(args: &MapArgs, verbose: bool) {
                     let pb_clone = pb.clone();
 
                     let result = bp
-                        .map_reads_to_sam_with_progress(
+                        .map_reads_to_output_with_progress(
                             &reads_refs,
                             args.output.to_str().unwrap(),
                             50,
                             if total > 1000 { 100 } else { 10 },
+                            args.bam,
                             move |completed, total| {
                                 pb_clone.set_position(completed as u64);
                                 pb_clone.set_message(format!("{}/{} reads", completed, total));
@@ -822,8 +1709,19 @@ fn cmd_map(args: &MapArgs, verbose: bool) {
         );
         let pb_clone = pb.clone();
 
-        let result = bp
-            .map_reads_parallel_with_progress(
+        let result = if bp.chunk_size() > 0 || bp.chunk_pct() > 0.0 {
+            bp.map_reads_with_chunking_parallel_with_progress(
+                &reads_refs,
+                args.output.to_str().unwrap(),
+                50,
+                move |completed, total| {
+                    pb_clone.set_position(completed as u64);
+                    pb_clone.set_message(format!("{}/{} reads", completed, total));
+                },
+            )
+            .unwrap_or(0)
+        } else {
+            bp.map_reads_parallel_with_progress(
                 &reads_refs,
                 args.output.to_str().unwrap(),
                 50,
@@ -833,7 +1731,8 @@ fn cmd_map(args: &MapArgs, verbose: bool) {
                     pb_clone.set_message(format!("{}/{} reads", completed, total));
                 },
             )
-            .unwrap_or(0);
+            .unwrap_or(0)
+        };
 
         pb.finish_with_message("Mapping complete");
         result
@@ -852,29 +1751,151 @@ fn cmd_map(args: &MapArgs, verbose: bool) {
         );
         let pb_clone = pb.clone();
 
-        let result = bp
-            .map_reads_to_sam_with_progress(
+        let result = if bp.chunk_size() > 0 || bp.chunk_pct() > 0.0 {
+            bp.map_reads_with_chunking_parallel_with_progress(
                 &reads_refs,
                 args.output.to_str().unwrap(),
                 50,
-                if total > 1000 { 100 } else { 10 },
                 move |completed, total| {
                     pb_clone.set_position(completed as u64);
                     pb_clone.set_message(format!("{}/{} reads", completed, total));
                 },
             )
-            .unwrap_or(0);
+            .unwrap_or(0)
+        } else {
+            bp.map_reads_to_output_with_progress(
+                &reads_refs,
+                args.output.to_str().unwrap(),
+                50,
+                if total > 1000 { 100 } else { 10 },
+                args.bam,
+                move |completed, total| {
+                    pb_clone.set_position(completed as u64);
+                    pb_clone.set_message(format!("{}/{} reads", completed, total));
+                },
+            )
+            .unwrap_or(0)
+        };
 
         pb.finish_with_message("Mapping complete");
         result
     };
 
+    let total_reads = filtered_reads_fasta.len();
+    let unmapped_reads = total_reads - mapped_count;
+    let mut mapped_count = mapped_count;
+
+    // Diagnostic output
+    if args.diagnose_unmapped && unmapped_reads > 0 {
+        println!("\nUnmapped read diagnostics (sample: 1000 reads):");
+        let mut reasons: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        let mut sample_count = 0;
+
+        for (_name, seq) in &filtered_reads_fasta {
+            if sample_count >= 1000 {
+                break;
+            }
+            let results = bp.map_read_with_mode(seq, align_mode, 50);
+            if results.is_empty() {
+                let reason = bp.diagnose_read(seq);
+                *reasons.entry(reason).or_insert(0) += 1;
+                sample_count += 1;
+            }
+        }
+
+        let mut sorted: Vec<_> = reasons.iter().collect();
+        sorted.sort_by(|a, b| b.1.cmp(a.1));
+        for (reason, count) in sorted {
+            println!("  [{:5}] {}", count, reason);
+        }
+    }
+
+    // Two-pass: re-map unmapped with lower threshold + EM refinement
+    if args.two_pass && unmapped_reads > 0 {
+        println!(
+            "\nSecond pass: remapping {} unmapped reads with lower threshold ({})",
+            unmapped_reads, args.second_pass_score
+        );
+
+        // Phase 1: Collect best mapping per unmapped read - parallel
+        let names = bp.genome_names_ordered();
+        let second_pass_score = args.second_pass_score;
+        let pb = ProgressBar::new(unmapped_reads as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner} 2nd pass: [{elapsed_precise} {bar:40} {pos}/{len}]")
+                .unwrap(),
+        );
+        let pb_clone = pb.clone();
+        let num_threads = args.reads_threads.max(1);
+
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build()
+            .unwrap();
+
+        let second_mappings: Vec<(String, String, String, MappingResult)> = pool.install(|| {
+            filtered_reads_fasta
+                .par_iter()
+                .filter_map(|(name, seq)| {
+                    let first_results = bp.map_read_with_mode(seq, align_mode, 50);
+                    if first_results.is_empty() {
+                        let second_results =
+                            bp.map_read_with_threshold(seq, align_mode, 50, second_pass_score);
+                        if let Some(best_hit) = second_results.into_iter().next() {
+                            let gname = if best_hit.genome_id < names.len() as u32 {
+                                names[best_hit.genome_id as usize].clone()
+                            } else {
+                                "*".to_string()
+                            };
+                            pb_clone.inc(1);
+                            Some((name.clone(), gname, seq.clone(), best_hit))
+                        } else {
+                            pb_clone.inc(1);
+                            None
+                        }
+                    } else {
+                        pb_clone.inc(1);
+                        None
+                    }
+                })
+                .collect()
+        });
+
+        pb.finish_with_message("2nd pass mapping done");
+
+        // Phase 2: Write mappings to SAM
+        let mut second_mapped = 0;
+        let output_path = args.output.to_path_buf();
+        let mut sam_file = std::io::BufWriter::new(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&output_path)
+                .unwrap(),
+        );
+
+        for (name, gname, seq, hit) in &second_mappings {
+            second_mapped += 1;
+            let pos = hit.position + 1;
+            let mapq = ((hit.score * 60.0) as u16).min(60);
+            let flag = if hit.is_reverse { 16u16 } else { 0u16 };
+            writeln!(
+                sam_file,
+                "{}\t{}\t{}\t{}\t{}\t{}\t*\t0\t0\t{}\t*\tMD:Z:{}\tS:f:{}",
+                name, flag, gname, pos, mapq, hit.cigar, seq, hit.md_string, hit.score
+            )
+            .unwrap();
+        }
+        mapped_count += second_mapped;
+        println!("  Second pass mapped: {} additional reads", second_mapped);
+    }
+
     let elapsed = start.elapsed();
 
     println!(
         "\nMapping complete: {}/{} reads mapped",
-        mapped_count,
-        filtered_reads_fasta.len()
+        mapped_count, total_reads
     );
     println!("  Alignment mode: {}", align_mode);
     println!("  Load time:  {:.3}s", load_time.as_secs_f64());
@@ -882,7 +1903,14 @@ fn cmd_map(args: &MapArgs, verbose: bool) {
     println!("  Total time: {:.2}s", elapsed.as_secs_f64());
 }
 
-fn cmd_map_paired(bp: &BitPop, r1_path: &Path, r2_path: &Path, output: &Path, min_quality: u8) {
+fn cmd_map_paired(
+    bp: &BitPop,
+    r1_path: &Path,
+    r2_path: &Path,
+    output: &Path,
+    min_quality: u8,
+    write_bam: bool,
+) {
     let map_start = Instant::now();
 
     println!("Paired-end mapping mode");
@@ -912,7 +1940,15 @@ fn cmd_map_paired(bp: &BitPop, r1_path: &Path, r2_path: &Path, output: &Path, mi
 
     let mapped_count = if min_quality > 0 {
         let result = bp
-            .map_paired_reads_parallel_quality(&pairs, output.to_str().unwrap(), min_quality, 50)
+            .map_paired_reads_parallel_quality(
+                &pairs,
+                output.to_str().unwrap(),
+                min_quality,
+                50,
+                true,
+                5,
+                write_bam,
+            )
             .unwrap_or(0);
 
         pb.set_position(total_pairs as u64);
@@ -921,7 +1957,7 @@ fn cmd_map_paired(bp: &BitPop, r1_path: &Path, r2_path: &Path, output: &Path, mi
         result
     } else {
         let result = bp
-            .map_paired_reads_parallel(&pairs, output.to_str().unwrap(), 50)
+            .map_paired_reads_parallel(&pairs, output.to_str().unwrap(), 50, true, 5, write_bam)
             .unwrap_or(0);
 
         pb.set_position(total_pairs as u64);
@@ -1489,7 +2525,7 @@ fn find_or_build_index_mmap(
         let index_path = genome_path.with_extension("bitpop");
 
         if !force && index_path.exists() {
-            let genome_hash = sha256_file(genome_path)?;
+            let _genome_hash = sha256_file(genome_path)?;
             let meta = std::fs::metadata(&index_path).map_err(|e| e.to_string())?;
             let index_mtime = meta.modified().map_err(|e| e.to_string())?;
             let genome_mtime = std::fs::metadata(genome_path)
@@ -1679,7 +2715,13 @@ async fn cmd_run(args: &RunArgs) -> Result<(), String> {
     };
 
     if args.spaced_seed {
-        println!("  Spaced seed: enabled (pattern: 11101001110111)");
+        if let Some(pattern) = &args.spaced_seed_pattern {
+            bp.set_spaced_seed_pattern(pattern);
+        }
+        println!(
+            "  Spaced seed: enabled (pattern: {})",
+            bp.spaced_seed_pattern()
+        );
         bp.set_spaced_seed(true);
     }
 
@@ -1704,6 +2746,79 @@ async fn cmd_run(args: &RunArgs) -> Result<(), String> {
 
     bp.set_read_type(&args.read_type);
     println!("  Read type: {}", args.read_type);
+
+    bp.set_search_radius(args.search_radius);
+    println!("  Search radius: {}bp", args.search_radius);
+
+    if let Some(chunk_size) = args.chunk_size {
+        bp.set_chunk_size(chunk_size);
+        println!("  Chunk size: {}bp (PacBio mode)", chunk_size);
+    }
+
+    if let Some(chunk_pct) = args.chunk_pct {
+        bp.set_chunk_pct(chunk_pct);
+    }
+
+    if let Some(chunk_min) = args.chunk_min {
+        bp.set_chunk_min(chunk_min);
+    }
+
+    if let Some(chunk_max) = args.chunk_max {
+        bp.set_chunk_max(chunk_max);
+    }
+
+    if bp.chunk_pct() > 0.0 {
+        println!(
+            "  Chunk pct: {:.2}% (dynamic, clamped {}-{}bp)",
+            bp.chunk_pct() * 100.0,
+            bp.chunk_min(),
+            bp.chunk_max()
+        );
+    }
+
+    if let Some(threshold) = args.chunk_vote_threshold {
+        bp.set_chunk_vote_threshold(threshold);
+        println!(
+            "  Chunk vote threshold: {:.0}% (requires {:.0}% chunk agreement)",
+            threshold * 100.0,
+            threshold * 100.0
+        );
+    }
+
+    if let Some(top_n) = args.chunk_top_n {
+        bp.set_chunk_top_n(top_n);
+        println!("  Chunk top-N: {} genomes per read", top_n);
+    }
+
+    let run_chunk_strategy = match args.chunk_strategy.as_str() {
+        "golden" => bit_pop::ChunkAnchorStrategy::Golden,
+        "spaced" => bit_pop::ChunkAnchorStrategy::Spaced,
+        _ => bit_pop::ChunkAnchorStrategy::Rarest,
+    };
+    bp.set_chunk_anchor_strategy(run_chunk_strategy);
+    if args.chunk_strategy != "rarest" {
+        println!("  Chunk strategy: {}", args.chunk_strategy);
+    }
+
+    if args.snp_detect {
+        bp.set_snp_detect(true);
+        bp.set_snp_min_support(args.snp_min_support);
+        println!(
+            "  SNP detection: enabled (min support: {}, penalty: {})",
+            args.snp_min_support,
+            bp.snp_penalty()
+        );
+    }
+
+    let run_align_mode = match args.align_mode.as_str() {
+        "sw" => AlignMode::Sw,
+        "hybrid" => AlignMode::Hybrid,
+        "softclip" => AlignMode::Softclip,
+        "chain" => AlignMode::Chain,
+        _ => AlignMode::Xor,
+    };
+    bp.set_align_mode(run_align_mode);
+    println!("  Alignment mode: {}", run_align_mode);
 
     // Step 3 (or 2): Map reads
     let step_map = if use_index { 2 } else { 3 };
@@ -1743,6 +2858,9 @@ async fn cmd_run(args: &RunArgs) -> Result<(), String> {
                     output_path.to_str().unwrap(),
                     args.min_quality,
                     50,
+                    true,
+                    5,
+                    args.bam,
                 )
                 .map_err(|e| format!("Mapping failed: {}", e))?;
 
@@ -1752,7 +2870,14 @@ async fn cmd_run(args: &RunArgs) -> Result<(), String> {
             result
         } else {
             let result = bp
-                .map_paired_reads_parallel(&pairs, output_path.to_str().unwrap(), 50)
+                .map_paired_reads_parallel(
+                    &pairs,
+                    output_path.to_str().unwrap(),
+                    50,
+                    true,
+                    5,
+                    args.bam,
+                )
                 .map_err(|e| format!("Mapping failed: {}", e))?;
 
             pb.set_position(total_pairs as u64);
@@ -1848,7 +2973,42 @@ async fn cmd_run(args: &RunArgs) -> Result<(), String> {
 
         let total_reads = reads_refs.len();
         let mapped_count =
-            if args.threads > 1 {
+            if args.chunk_size.is_some() || args.chunk_pct.is_some() {
+                // Chunk-based mapping for PacBio long reads
+                let pb = ProgressBar::new(total_reads as u64);
+                pb.set_style(ProgressStyle::default_bar()
+                .template("{spinner} Chunk mapping: [{elapsed_precise} {bar:40} {pos}/{len}] {msg}")
+                .unwrap());
+
+                let result = if args.threads > 1 {
+                    bp.map_reads_with_chunking_parallel(
+                        &reads_refs,
+                        output_path.to_str().unwrap(),
+                        50,
+                    )
+                    .map_err(|e| format!("Mapping failed: {}", e))?;
+                    total_reads
+                } else {
+                    let pb_inner = pb.clone();
+                    let result = bp
+                        .map_reads_to_output_with_progress(
+                            &reads_refs,
+                            output_path.to_str().unwrap(),
+                            50,
+                            if total_reads > 1000 { 100 } else { 10 },
+                            args.bam,
+                            move |completed, total| {
+                                pb_inner.set_position(completed as u64);
+                                pb_inner.set_message(format!("{}/{} reads", completed, total));
+                            },
+                        )
+                        .map_err(|e| format!("Mapping failed: {}", e))?;
+                    result
+                };
+
+                pb.finish_with_message("Chunk mapping complete");
+                result
+            } else if args.threads > 1 {
                 let pb = ProgressBar::new(total_reads as u64);
                 pb.set_style(ProgressStyle::default_bar()
                 .template("{spinner} Mapping reads: [{elapsed_precise} {bar:40} {pos}/{len}] {msg}")
@@ -1878,11 +3038,12 @@ async fn cmd_run(args: &RunArgs) -> Result<(), String> {
                 let pb_clone = pb.clone();
 
                 let result = bp
-                    .map_reads_to_sam_with_progress(
+                    .map_reads_to_output_with_progress(
                         &reads_refs,
                         output_path.to_str().unwrap(),
                         50,
                         if total_reads > 1000 { 100 } else { 10 },
+                        args.bam,
                         move |completed, total| {
                             pb_clone.set_position(completed as u64);
                             pb_clone.set_message(format!("{}/{} reads", completed, total));
@@ -2174,4 +3335,522 @@ fn cmd_em(args: &EmArgs) {
     println!("  Classifications changed: {}", changed);
     println!();
     println!("EM completed in {:.2}s total", elapsed.as_secs_f64());
+}
+
+fn cmd_consensus(args: &ConsensusArgs) {
+    use bit_pop::consensus::ConsensusStrategy;
+    use std::time::Instant;
+
+    let start = Instant::now();
+    println!("Bit-Pop multi-k consensus");
+    println!("==========================");
+    println!();
+
+    // Parse index paths (split on last ':' to handle Windows paths like C:\...)
+    let mut index_paths: Vec<(PathBuf, usize)> = Vec::new();
+    for idx_arg in &args.indexes {
+        if let Some(colon_pos) = idx_arg.rfind(':') {
+            let path_str = &idx_arg[..colon_pos];
+            let k_str = &idx_arg[colon_pos + 1..];
+            let path = PathBuf::from(path_str);
+            let k: usize = k_str.parse().unwrap_or_else(|e| {
+                eprintln!("Error: invalid k value '{}': {}", k_str, e);
+                std::process::exit(1);
+            });
+            if !path.exists() {
+                eprintln!("Error: index file not found: {}", path.display());
+                std::process::exit(1);
+            }
+            index_paths.push((path, k));
+        } else {
+            eprintln!(
+                "Error: invalid index format '{}'. Expected 'path:k'",
+                idx_arg
+            );
+            std::process::exit(1);
+        }
+    }
+
+    println!("Indexes:");
+    for (path, k) in &index_paths {
+        println!("  k={} → {}", k, path.display());
+    }
+    println!();
+
+    // Parse strategy
+    let strategy = match args.strategy.as_str() {
+        "majority" => ConsensusStrategy::Majority,
+        "best_score" => ConsensusStrategy::BestScore,
+        _ => ConsensusStrategy::WeightedScore,
+    };
+
+    println!("[1/3] Loading indexes...");
+    let mut consensus =
+        MultiKConsensus::from_paths(&index_paths, args.min_score).unwrap_or_else(|e| {
+            eprintln!("Error loading indexes: {}", e);
+            std::process::exit(1);
+        });
+
+    consensus.strategy = strategy;
+    // Set top_n on each BitPop index (controls rare k-mer anchors)
+    for bp in consensus.indexes.values_mut() {
+        bp.set_top_n(args.top_n);
+    }
+    consensus.chunk_size = args.chunk_size;
+    consensus.chunk_pct = args.chunk_pct;
+    consensus.chunk_min = args.chunk_min;
+    consensus.chunk_max = args.chunk_max;
+    consensus.enable_snp_detect = args.snp_detect;
+    consensus.snp_min_support = args.snp_min_support;
+    consensus.snp_penalty = args.snp_penalty;
+    consensus.min_k_mappings = args.min_k_mappings;
+    consensus.top_n = args.top_n;
+
+    println!();
+    println!("[2/3] Mapping reads...");
+    println!("  Reads: {}", args.reads.display());
+    println!("  Output: {}", args.output.display());
+    println!(
+        "  Strategy: {}",
+        match strategy {
+            ConsensusStrategy::Majority => "majority",
+            ConsensusStrategy::WeightedScore => "weighted_score",
+            ConsensusStrategy::BestScore => "best_score",
+        }
+    );
+    println!("  Threads: {}", args.threads);
+    println!(
+        "  Chunk size: {} (fixed), {}% (dynamic)",
+        args.chunk_size, args.chunk_pct
+    );
+
+    // Base mode: use same parallel mapping as standalone map command
+    if args.base {
+        println!("  Base: enabled (same parallel mapping as `map` command)");
+        match consensus.map_reads_to_sam_base(&args.reads, &args.output, args.threads) {
+            Ok((mapped, total)) => {
+                println!();
+                println!("==========================");
+                println!("Done!");
+                println!("  Mapped: {} / {} reads", mapped, total);
+                println!("  Output: {}", args.output.display());
+                println!();
+                println!("Total time: {:.2}s", start.elapsed().as_secs_f64());
+            }
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    // Two-pass mode: map each k separately, then combine (like Python script)
+    if args.two_pass {
+        println!("  Two-pass: enabled (map each k separately, then combine)");
+        match consensus.map_reads_to_sam_two_pass(&args.reads, &args.output, args.threads, false) {
+            Ok((mapped, total)) => {
+                println!();
+                println!("==========================");
+                println!("Done!");
+                println!("  Mapped: {} / {} reads", mapped, total);
+                println!("  Output: {}", args.output.display());
+                println!();
+                println!("Total time: {:.2}s", start.elapsed().as_secs_f64());
+            }
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    // Streaming mode
+    if args.stream {
+        let chunk_size = parse_stream_chunk_size(&args.max_ram);
+        println!("  Streaming: enabled (chunk={} reads)", chunk_size);
+        match consensus.map_reads_to_sam_stream(&args.reads, &args.output, args.threads, chunk_size)
+        {
+            Ok((mapped, total)) => {
+                println!();
+                println!("==========================");
+                println!("Done!");
+                println!("  Mapped: {} / {} reads", mapped, total);
+                println!("  Output: {}", args.output.display());
+                println!();
+                println!("Total time: {:.2}s", start.elapsed().as_secs_f64());
+            }
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    match consensus.map_reads_to_sam(&args.reads, &args.output, args.threads) {
+        Ok((mapped, total)) => {
+            println!();
+            println!("==========================");
+            println!("Done!");
+            println!("  Mapped: {} / {} reads", mapped, total);
+            println!("  Output: {}", args.output.display());
+            println!();
+            println!("Total time: {:.2}s", start.elapsed().as_secs_f64());
+        }
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_chunk_consensus(args: &ChunkConsensusArgs) {
+    use bit_pop::chunk_consensus::ConsensusStrategy;
+    use std::time::Instant;
+
+    let start = Instant::now();
+    println!("Bit-Pop chunk-consensus");
+    println!("========================");
+    println!();
+
+    // Parse chunk percentages
+    let chunk_pcts: Vec<f64> = args
+        .chunk_pcts
+        .split(',')
+        .map(|s| {
+            s.trim().parse::<f64>().unwrap_or_else(|e| {
+                eprintln!("Error: invalid chunk_pct '{}': {}", s.trim(), e);
+                std::process::exit(1);
+            })
+        })
+        .collect();
+
+    if chunk_pcts.is_empty() {
+        eprintln!("Error: at least one chunk_pct is required");
+        std::process::exit(1);
+    }
+
+    let index_path = args.index.to_str().unwrap();
+    if !args.index.exists() {
+        eprintln!("Error: index file not found: {}", args.index.display());
+        std::process::exit(1);
+    }
+
+    println!("Index: {}", args.index.display());
+    println!(
+        "Chunk configs: {:?}",
+        chunk_pcts
+            .iter()
+            .map(|p| format!("{:.0}%", p * 100.0))
+            .collect::<Vec<_>>()
+    );
+    println!();
+
+    let strategy = match args.strategy.as_str() {
+        "majority" => ConsensusStrategy::Majority,
+        _ => ConsensusStrategy::WeightedScore,
+    };
+
+    println!("[1/3] Loading index ({} configs)...", chunk_pcts.len());
+    let mut consensus = MultiChunkConsensus::from_path(
+        index_path,
+        &chunk_pcts,
+        args.chunk_min,
+        args.chunk_max,
+        args.min_score,
+    )
+    .unwrap_or_else(|e| {
+        eprintln!("Error loading index: {}", e);
+        std::process::exit(1);
+    });
+
+    consensus.strategy = strategy;
+    if let Some(min_agree) = args.min_agreement {
+        consensus.min_agreement = min_agree;
+    }
+    consensus.top_n = args.top_n;
+
+    println!();
+    println!("[2/3] Mapping reads...");
+    println!("  Reads: {}", args.reads.display());
+    println!("  Output: {}", args.output.display());
+    println!(
+        "  Strategy: {}",
+        if strategy == ConsensusStrategy::Majority {
+            "majority"
+        } else {
+            "weighted_score"
+        }
+    );
+    println!(
+        "  Min agreement: {}/{}",
+        consensus.min_agreement,
+        chunk_pcts.len()
+    );
+    println!("  Threads: {}", args.threads);
+
+    let result = if args.stream {
+        let chunk_size = if let Some(ref max_ram) = args.max_ram {
+            parse_stream_chunk_size(&Some(max_ram.clone()))
+        } else {
+            20_000_000
+        };
+        println!("  Streaming: chunk size = {} reads", chunk_size);
+        consensus.map_reads_to_sam_stream(&args.reads, &args.output, args.threads, chunk_size)
+    } else {
+        consensus.map_reads_to_sam(&args.reads, &args.output, args.threads)
+    };
+
+    match result {
+        Ok((mapped, total)) => {
+            println!();
+            println!("========================");
+            println!("Done!");
+            println!(
+                "  Mapped: {} / {} reads ({:.1}%)",
+                mapped,
+                total,
+                mapped as f64 / total as f64 * 100.0
+            );
+            println!("  Output: {}", args.output.display());
+            println!();
+            println!("Total time: {:.2}s", start.elapsed().as_secs_f64());
+        }
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_tax(args: &TaxArgs) {
+    use bit_pop::taxonomy::{compute_tax_report, format_tax_report, TaxonomyTree};
+    use std::collections::HashMap;
+    use std::io::BufRead;
+    use std::time::Instant;
+
+    let start = Instant::now();
+
+    println!("Bit-Pop Taxonomic Classification Report");
+    println!("========================================");
+    println!();
+
+    // Load taxonomy tree
+    println!("Loading taxonomy tree...");
+    let tax_start = Instant::now();
+    let mut tree = match TaxonomyTree::load(
+        args.nodes_dmp.to_str().unwrap(),
+        args.names_dmp.to_str().unwrap(),
+    ) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("Error loading taxonomy: {}", e);
+            eprintln!();
+            eprintln!("Download from: https://ftp.ncbi.nlm.nih.gov/pub/taxonomy/taxdump.tar.gz");
+            eprintln!(
+                "Extract nodes.dmp and names.dmp, then pass with --nodes-dmp and --names-dmp"
+            );
+            std::process::exit(1);
+        }
+    };
+    let tax_time = tax_start.elapsed();
+    println!(
+        "  Loaded {} taxonomy nodes in {:.2}s",
+        tree.node_count(),
+        tax_time.as_secs_f64()
+    );
+
+    // Parse SAM file
+    println!("Loading SAM: {}", args.input.to_string_lossy());
+    let file = match std::fs::File::open(&args.input) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("Error opening SAM file: {}", e);
+            std::process::exit(1);
+        }
+    };
+    let reader = std::io::BufReader::new(file);
+
+    let mut genome_counts: HashMap<String, usize> = HashMap::new();
+    let mut seen_reads: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut unmapped: usize = 0;
+
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+
+        if line.starts_with('@') || line.is_empty() {
+            continue;
+        }
+
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() < 11 {
+            continue;
+        }
+
+        let read_name = fields[0];
+        let ref_name = fields[2];
+
+        if ref_name == "*" {
+            unmapped += 1;
+            continue;
+        }
+
+        // Count each read only once (primary mapping)
+        if seen_reads.insert(read_name.to_string()) {
+            *genome_counts.entry(ref_name.to_string()).or_insert(0) += 1;
+        }
+    }
+
+    let total_mapped: usize = genome_counts.values().sum();
+    println!(
+        "  Loaded {} mapped reads (+ {} unmapped)",
+        total_mapped, unmapped
+    );
+    println!("  Found {} unique genomes", genome_counts.len());
+
+    // Map genome names to taxonomy IDs
+    println!("Mapping genomes to taxonomy...");
+    let mut mapped = 0usize;
+    let mut unmapped_genomes = Vec::new();
+
+    for genome_name in genome_counts.keys() {
+        if tree.map_genome_name(genome_name).is_some() {
+            mapped += 1;
+        } else {
+            unmapped_genomes.push(genome_name.clone());
+        }
+    }
+
+    println!(
+        "  Mapped {}/{} genomes to taxonomy",
+        mapped,
+        genome_counts.len()
+    );
+
+    if !unmapped_genomes.is_empty() {
+        println!(
+            "  Warning: {} genomes not found in taxonomy:",
+            unmapped_genomes.len()
+        );
+        for name in &unmapped_genomes[..unmapped_genomes.len().min(5)] {
+            println!("    - {}", name);
+        }
+        if unmapped_genomes.len() > 5 {
+            println!("    ... and {} more", unmapped_genomes.len() - 5);
+        }
+    }
+
+    // Compute taxonomic report
+    println!();
+    let report = compute_tax_report(&tree, &genome_counts);
+
+    // Output report
+    let report_text = format_tax_report(&report, args.top_n);
+
+    if args.format == "json" {
+        let mut json_entries: Vec<serde_json::Value> = Vec::new();
+        for (rank, entries) in &report.ranks {
+            if rank == "no rank" {
+                continue;
+            }
+            for (name, count, pct) in entries {
+                json_entries.push(serde_json::json!({
+                    "rank": rank,
+                    "name": name,
+                    "count": count,
+                    "percentage": (pct * 100.0).round() / 100.0,
+                }));
+            }
+        }
+        let json_output = serde_json::json!({
+            "total_reads": report.total_reads,
+            "taxonomic_breakdown": json_entries,
+        });
+        print!("{}", serde_json::to_string_pretty(&json_output).unwrap());
+    } else {
+        print!("{}", report_text);
+    }
+
+    // Write to file if specified
+    if let Some(ref output_path) = args.output {
+        let content = if args.format == "json" {
+            let mut json_entries: Vec<serde_json::Value> = Vec::new();
+            for (rank, entries) in &report.ranks {
+                if rank == "no rank" {
+                    continue;
+                }
+                for (name, count, pct) in entries {
+                    json_entries.push(serde_json::json!({
+                        "rank": rank,
+                        "name": name,
+                        "count": count,
+                        "percentage": (pct * 100.0).round() / 100.0,
+                    }));
+                }
+            }
+            let json_output = serde_json::json!({
+                "total_reads": report.total_reads,
+                "taxonomic_breakdown": json_entries,
+            });
+            serde_json::to_string_pretty(&json_output).unwrap()
+        } else {
+            report_text.clone()
+        };
+        match std::fs::write(output_path, content) {
+            Ok(_) => println!("\nReport saved to: {}", output_path.display()),
+            Err(e) => eprintln!("Error writing report: {}", e),
+        }
+    }
+
+    let elapsed = start.elapsed();
+    println!("\nTotal time: {:.2}s", elapsed.as_secs_f64());
+}
+
+/// Parse max-ram string and calculate optimal chunk size.
+/// Returns chunk size in number of reads.
+fn parse_stream_chunk_size(max_ram: &Option<String>) -> usize {
+    let total_ram_bytes = if let Some(ref ram_str) = max_ram {
+        parse_ram_bytes(ram_str)
+    } else {
+        // Default: use available system memory (estimate 64GB if unknown)
+        64 * 1024 * 1024 * 1024
+    };
+
+    // Reserve 10% for OS and indexes
+    let available = total_ram_bytes as f64 * 0.9;
+
+    // Estimate ~500 bytes per read in memory (name + seq + qual + overhead)
+    let bytes_per_read = 500.0;
+    let chunk_size = (available / bytes_per_read) as usize;
+
+    // Clamp to reasonable range
+    chunk_size.clamp(500_000, 20_000_000)
+}
+
+/// Parse RAM string like "32G", "16GB", "8G" to bytes.
+fn parse_ram_bytes(s: &str) -> u64 {
+    let s = s.trim().to_uppercase();
+    let (num_str, unit) = if s.ends_with("GB") {
+        (&s[..s.len() - 2], "GB")
+    } else if s.ends_with('G') {
+        (&s[..s.len() - 1], "G")
+    } else if s.ends_with("MB") {
+        (&s[..s.len() - 2], "MB")
+    } else if s.ends_with('M') {
+        (&s[..s.len() - 1], "M")
+    } else {
+        (s.as_str(), "B")
+    };
+
+    let num: f64 = num_str.trim().parse().unwrap_or(64.0);
+    match unit {
+        "GB" | "G" => (num * 1024.0 * 1024.0 * 1024.0) as u64,
+        "MB" | "M" => (num * 1024.0 * 1024.0) as u64,
+        _ => num as u64,
+    }
 }

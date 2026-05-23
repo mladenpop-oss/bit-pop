@@ -46,6 +46,87 @@ pub fn parse_fastq(path: &str) -> IoResult<Vec<(String, String, Vec<u8>)>> {
     Ok(reads)
 }
 
+/// Parse FASTQ in chunks, yielding one chunk at a time.
+/// Returns None when file is exhausted.
+pub struct FastqChunkParser {
+    reader: BufReader<File>,
+    chunk_size: usize,
+}
+
+impl FastqChunkParser {
+    pub fn new(path: &str, chunk_size: usize) -> IoResult<Self> {
+        let file = File::open(path)?;
+        let reader = BufReader::new(file);
+        Ok(Self { reader, chunk_size })
+    }
+
+    /// Get total number of reads in file (counts by scanning @ lines).
+    pub fn count_reads(path: &str) -> IoResult<usize> {
+        let file = File::open(path)?;
+        let reader = BufReader::new(file);
+        let mut count = 0usize;
+        for line in reader.lines() {
+            let l = line?;
+            if l.starts_with('@') {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    /// Read one line from the internal reader.
+    fn read_line(&mut self) -> IoResult<Option<String>> {
+        let mut buf = Vec::new();
+        self.reader.read_until(b'\n', &mut buf)?;
+        if buf.is_empty() {
+            return Ok(None);
+        }
+        let s = String::from_utf8_lossy(&buf).to_string();
+        Ok(Some(s))
+    }
+
+    /// Parse next chunk of reads. Returns None when done.
+    pub fn next_chunk(&mut self) -> IoResult<Option<Vec<(String, String, Vec<u8>)>>> {
+        let mut reads = Vec::with_capacity(self.chunk_size);
+
+        while let Some(header) = self.read_line()? {
+            if !header.starts_with('@') {
+                break;
+            }
+
+            let read_name = header[1..].trim().to_string();
+
+            let seq_line = match self.read_line()? {
+                Some(s) => s.trim().to_string(),
+                None => break,
+            };
+
+            // Skip + line
+            if self.read_line()?.is_none() {
+                break;
+            }
+
+            let qual_line = match self.read_line()? {
+                Some(q) => q,
+                None => break,
+            };
+
+            let quality: Vec<u8> = qual_line.bytes().map(|b| b.saturating_sub(33)).collect();
+            reads.push((read_name, seq_line, quality));
+
+            if reads.len() >= self.chunk_size {
+                break;
+            }
+        }
+
+        if reads.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(reads))
+        }
+    }
+}
+
 /// Parse a FASTA file and return read names and sequences (no quality scores).
 pub fn parse_fasta(path: &str) -> IoResult<Vec<(String, String)>> {
     let file = File::open(path)?;

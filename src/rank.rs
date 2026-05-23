@@ -52,6 +52,9 @@ pub fn rank_mappings(
             cigar: format!("{}M", read_length),
             context: String::new(),
             is_reverse: false,
+            rarity,
+            md_string: String::new(),
+            hf_score: 0.0,
         });
     }
 
@@ -136,6 +139,9 @@ mod tests {
                 cigar: "10M".into(),
                 context: String::new(),
                 is_reverse: false,
+                rarity: 0.5,
+                md_string: String::new(),
+                hf_score: 0.0,
             },
             MappingResult {
                 genome_id: 0,
@@ -144,6 +150,9 @@ mod tests {
                 cigar: "10M".into(),
                 context: String::new(),
                 is_reverse: false,
+                rarity: 0.3,
+                md_string: String::new(),
+                hf_score: 0.0,
             },
             MappingResult {
                 genome_id: 0,
@@ -152,6 +161,9 @@ mod tests {
                 cigar: "10M".into(),
                 context: String::new(),
                 is_reverse: false,
+                rarity: 0.1,
+                md_string: String::new(),
+                hf_score: 0.0,
             },
         ];
         let filtered = filter_by_score(results, 0.6);
@@ -169,6 +181,9 @@ mod tests {
                 cigar: "10M".into(),
                 context: String::new(),
                 is_reverse: false,
+                rarity: 0.5,
+                md_string: String::new(),
+                hf_score: 0.0,
             },
             MappingResult {
                 genome_id: 0,
@@ -177,6 +192,9 @@ mod tests {
                 cigar: "10M".into(),
                 context: String::new(),
                 is_reverse: false,
+                rarity: 0.4,
+                md_string: String::new(),
+                hf_score: 0.0,
             },
             MappingResult {
                 genome_id: 0,
@@ -185,6 +203,9 @@ mod tests {
                 cigar: "10M".into(),
                 context: String::new(),
                 is_reverse: false,
+                rarity: 0.3,
+                md_string: String::new(),
+                hf_score: 0.0,
             },
         ];
         let deduped = deduplicate(results, 10);

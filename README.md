@@ -1,13 +1,18 @@
 # Bit-Pop: Multi-Genome DNA Read Classification
 
 [![CI](https://github.com/mladenpop-oss/bit-pop/actions/workflows/ci.yml/badge.svg)](https://github.com/mladenpop-oss/bit-pop/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-263%2B%20unit%2C%205%20integration-blue)](https://github.com/mladenpop-oss/bit-pop)
+[![Tests](https://img.shields.io/badge/tests-312%2B%20unit%2C%205%20integration-blue)](https://github.com/mladenpop-oss/bit-pop)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20043593.svg)](https://doi.org/10.5281/zenodo.20043593)
 
-> **Ultra-fast multi-genome DNA read classification in under 1 second.** Maps 20k reads across 3 genomes at **99.3% accuracy** using a compact FM-index built in Rust with bit-level parallelism.
+> **Ultra-fast multi-genome DNA read classification.** Maps reads across dozens of genomes using a compact FM-index built in Rust with bit-level parallelism.
 
-**Quick benchmark**: 19.7 Mb across 3 genomes (E. coli, S. aureus, S. cerevisiae) → **99.3% mapping rate**, **99.9% classification accuracy**, **0.9s per 10k reads**.
+**Quick benchmark** (3 genomes, 19.7 Mb): **99.3% mapping rate**, **99.9% classification accuracy**, **0.9s per 10k reads**.
+
+**CAMI benchmark** (61 genomes, 157 Mb):
+- **Best accuracy**: k14+k13 consensus, **89.85% accuracy**, 79.3% mapping rate
+- **Best coverage**: k10 two-pass tn=4 (--second-pass-score 0.4), **85.20% accuracy**, 96.6% mapping rate
+- **Best balanced**: xor tn=4 + EM, **86.77% accuracy**, 85.8% mapping rate
 
 While existing aligners (Bowtie2, BWA, minimap2) map reads to single reference genomes, Bit-Pop identifies **which genome** in a collection best matches each read — making it ideal for metagenomic classification tasks.
 
@@ -29,7 +34,13 @@ cargo build --release
   data/genomes/Ecoli_K12_MG1655.fna \
   -1 data/reads/R1.fastq -2 data/reads/R2.fastq
 
-# 4. Download from NCBI and map
+# 4. Output BAM format (binary, compressed)
+./target/release/bit-pop run \
+  data/genomes/Ecoli_K12_MG1655.fna \
+  data/reads/simulated_ecoli_10k_new.fastq \
+  -o output.bam --bam
+
+# 5. Download from NCBI and map
 ./target/release/bit-pop run \
   --ncbi "Escherichia coli" \
   data/reads/simulated_ecoli_10k_new.fastq
@@ -39,16 +50,17 @@ See [Usage](#usage) for full documentation.
 
 ## Features
 
+### Core
+
 - **Multi-genome indexing**: All reference genomes indexed in a single FM-index structure
 - **Speed via bit-level operations**: 2-bit XOR alignment achieving ~2.3 ns per 31-base XOR chunk operation
-- **Myers edit distance**: 23-54x faster alternative to Smith-Waterman for alignment
-- **Spaced seeds**: Improved sensitivity for high-error reads (Nanopore, PacBio)
-- **Adaptive k-mer size**: Auto-calculates optimal k based on genome size (`--auto-k`)
-- **Quality-aware refinement**: Smith-Waterman local alignment with Phred-scaled quality penalties
+- **Top-N rarest k-mer anchors**: Fallback to 2nd/3rd rarest k-mers for improved mapping rate (`--top-n`)
 - **Combined ranking**: Formula balancing alignment score (85%) and k-mer rarity (15%)
-- **Top-N rarest k-mer anchors**: Fallback to 2nd/3rd rarest k-mers for improved mapping rate
 - **Reverse complement support**: Full RC-aware mapping with proper SAM FLAG 0x10 handling
 - **Paired-end support**: Full SAM specification compliance with proper FLAG handling
+- **Native BAM output**: Binary alignment map format with BGZF compression (`--bam` flag)
+- **Discordant pair reconciliation**: Automatic concordant genome resolution for R1/R2 cross-genome conflicts
+- **Gaussian insert size model**: Probabilistic paired-end classification using normal distribution of observed insert sizes
 - **Parallel mapping**: Work-stealing scheduler using rayon for multi-core speedup
 - **Parallel index build**: Multi-threaded BWT and suffix array construction
 - **Memory-mapped FASTA**: Reduced memory footprint with `--mmap` flag
@@ -56,31 +68,25 @@ See [Usage](#usage) for full documentation.
 - **NCBI integration**: Download genomes directly from NCBI with `--ncbi` flag
 - **Progress reporting**: CLI progress bars for build and mapping operations
 - **Smart defaults**: Automatic output paths, index detection, and progress reporting
-- **Fuzzy k-mer matching**: Three methods for improved strain resolution (`--method` flag)
-- **EM post-processing**: Expectation-Maximization algorithm for multi-candidate refinement (`bit-pop em` command), +1.4pp evo_*, +4.49pp overall
 
-## Fuzzy K-mer Methods
+### Post-Processing
 
-Bit-Pop supports three fuzzy k-mer matching methods for improved resolution of highly similar genomes (e.g., bacterial strains with >99.9% identity):
+- **EM post-processing**: Expectation-Maximization algorithm for multi-candidate refinement (`bit-pop em` command), +0.29% accuracy on CAMI dataset
+- **Taxonomic classification**: NCBI taxonomy tree with LCA algorithm for genus/phylum/class-level abundance profiles (`bit-pop tax` command)
 
-| Method | Flag | Description |
-|--------|------|-------------|
-| **None** (default) | `--method none` | Exact k-mer matching only |
-| **Fuzzy K-mer** | `--method fuzzy-kmer --fuzzy-mismatches N` | Generate all k-mer variants with N substitutions, query FM-index for each |
-| **Fuzzy Seed** | `--method fuzzy-seed --fuzzy-mismatches N` | Allow N mismatches in spaced seed "match" positions |
-| **Neighborhood** | `--method neighborhood --fuzzy-mismatches N` | Build hash table at index build time for O(1) fuzzy lookup |
+### 🔬 Experimental Features
 
-**Example:**
-```bash
-bit-pop run genome.fna reads.fastq --method fuzzy-kmer --fuzzy-mismatches 1
-```
+The following features are available for testing purposes and may be useful for specific use cases (long reads, high-error data):
 
-**Trade-offs:**
-- `fuzzy-kmer`: Best accuracy for strain resolution, ~30x slower (N=1)
-- `fuzzy-seed`: Good balance, works with spaced seeds, ~20x slower (N=1)
-- `neighborhood`: Fastest query time, but larger index file (~60x memory for N=1)
-
-
+| Feature | Flag | Description |
+|---------|------|-------------|
+| Multi-k consensus | `bit-pop consensus` / `scripts/consensus_base.py` | Combine multiple k-mer indexes (best: k14+k13 = 89.85% accuracy) |
+| Streaming mode | `--stream` | Process large FASTQ files with fixed RAM (~3GB per chunk) |
+| Two-pass mapping | `--two-pass` | Re-map unmapped reads with lower threshold (+183 correct reads, CAMI 100k sample) |
+| Fuzzy k-mer matching | `--method` | Fuzzy k-mer matching for error-prone reads |
+| Soft-clipping | `-a softclip` | Adapter/low-quality region detection for reads with contamination |
+| Gap-aware chaining | `-a chain` | Long-read alignment for ONT/PacBio data |
+| Adaptive k-mer size | `--auto-k` | Automatic k-mer size selection based on genome size |
 
 ## Comparison with Existing Tools
 
@@ -98,26 +104,20 @@ bit-pop run genome.fna reads.fastq --method fuzzy-kmer --fuzzy-mismatches 1
 
 ## Bit-Pop vs Kraken2 — Different Tools for Different Use Cases
 
-Kraken2 is like Google — knows everything, needs a datacenter, requires 100GB+ databases.
-Bit-Pop is like a local database — knows what you need, works offline, instant response.
-
 ### Key Differences
 
 | | Bit-Pop | Kraken2 |
 |---|---------|---------|
 | Database size | MB (only your genomes) | 100GB+ (entire NCBI) |
-| Internet required | ❌ No | ✅ Yes (every update) |
+| Customization | Add/remove genomes in seconds | Fixed database, no customization |
 | Build time | 2 minutes | Hours to days |
-| Offline operation | ✅ Full | ❌ No |
-| Custom update | Seconds (add 1 genome) | Rebuild entire database |
-| Index growth | Grows only with your data, always clean | Fixed massive database with unused data |
+| Index growth | Grows only with your data | Pre-built massive database with unused data |
 
 ### When to Use Bit-Pop
 
-- **Clinical microbiology** — A hospital tracks 20 strains. Build the index once, classify every patient sample in 0.13s, offline, on a laptop.
-- **Field work** — A researcher in the Amazon with an offline laptop. 1.4GB on a USB drive, classify samples on-site.
+- **Clinical microbiology** — A hospital tracks 20 strains. Build the index once, classify every patient sample in 0.13s.
 - **Outbreak detection** — A new bacterium appears. Download one genome (MB), add to index, classify immediately.
-- **Edge deployment** — Docker container on an IoT device, offline, instant response.
+- **Targeted analysis** — You know which genomes matter and want a lightweight, customizable solution.
 
 Kraken2 is better for: broad metagenomics where you don't know what you're looking for.
 Bit-Pop is better for: **targeted searching** where you know what matters.
@@ -127,11 +127,8 @@ Bit-Pop is better for: **targeted searching** where you know what matters.
 1. **FM-index** (SA-IS via libsais) for efficient k-mer lookup
 2. **Anchor-based k-mer filtering** (top-N rarest k-mer selection with fallback)
 3. **2-bit XOR alignment** (~2.3 ns per 31-base chunk for exact/near-exact matches)
-4. **Myers edit distance** (23-54x faster alternative to Smith-Waterman)
-5. **Spaced seed** matching (optional, `-s` flag) for improved sensitivity on error-prone reads
-6. **Smith-Waterman refinement** for lower confidence scores (<0.9)
-7. **Multi-genome ranking** with combined scoring formula
-8. **Reverse complement** scoring — tries both forward and RC, returns best match
+4. **Multi-genome ranking** with combined scoring formula
+5. **Reverse complement** scoring — tries both forward and RC, returns best match
 
 ## Installation
 
@@ -170,6 +167,12 @@ cargo build --release
 
 ## Usage
 
+### Global Flags
+
+| Flag | Description |
+|------|-------------|
+| `-v, --verbose` | Enable verbose output |
+
 ### One-Command Workflow (Recommended)
 
 ```bash
@@ -206,6 +209,13 @@ cargo build --release
   -o index.bitpop \
   -k 10 \
   -t 4
+
+# CAMI mode — extract genome names from filenames
+./target/release/bit-pop build \
+  -f genome.fasta \
+  -o index.bitpop \
+  --cami \
+  --mmap
 ```
 
 #### Map Reads
@@ -225,8 +235,39 @@ cargo build --release
   --reads-1 R1.fastq \
   --reads-2 R2.fastq \
   -o output.sam \
-  -a hybrid \
+  -a xor \
   -t 4
+
+# PacBio chunked mapping
+./target/release/bit-pop map \
+  -i index.bitpop \
+  -r reads.fastq \
+  -o output.sam \
+  --chunk-size 1000 \
+  --chunk-pct 0.8 \
+  --chunk-min 50 \
+  --chunk-max 200 \
+  --chunk-vote-threshold 0.7 \
+  --chunk-top-n 3
+
+# Streaming mode (for huge FASTQ files, limits RAM usage)
+./target/release/bit-pop map \
+  -i index.bitpop \
+  -r large_reads.fastq \
+  -o output.sam \
+  --stream \
+  --max-ram 32G \
+  -t 16
+
+# Two-pass mapping (re-maps unmapped reads with lower threshold + EM refinement)
+./target/release/bit-pop map \
+  -i index.bitpop \
+  -r reads.fastq \
+  -o output.sam \
+  --two-pass \
+  --second-pass-score 0.4 \
+  --top-n 4 \
+  -t 16
 ```
 
 #### Show Index Statistics
@@ -242,7 +283,22 @@ cargo build --release
   -i existing.bitpop \
   -f new_genome.fasta \
   -o updated.bitpop
+
+# With memory-mapped I/O and parallel build
+./target/release/bit-pop load \
+  -i existing.bitpop \
+  -f new_genome.fasta \
+  -o updated.bitpop \
+  --mmap \
+  -t 4
 ```
+
+**Parameters:**
+- `-i, --index`: Existing index path (required)
+- `-f, --fasta`: New genome FASTA file (required)
+- `-o, --output`: Updated index path (required)
+- `-t, --threads`: Number of threads (default: 1)
+- `--mmap`: Use memory-mapped FASTA loading (feature-gated)
 
 #### Search NCBI
 
@@ -250,7 +306,27 @@ cargo build --release
 ./target/release/bit-pop search \
   --organism "Escherichia coli" \
   -n 10
+
+# Filter by molecule type
+./target/release/bit-pop search \
+  --organism "Escherichia coli" \
+  -m "genomic DNA" \
+  -n 20
+
+# With API key for higher rate limit
+./target/release/bit-pop search \
+  --organism "Escherichia coli" \
+  -n 20 \
+  --api-key YOUR_API_KEY \
+  --email user@example.com
 ```
+
+**Parameters:**
+- `--organism`: Organism name to search (required)
+- `-n, --limit`: Maximum number of results (default: 10)
+- `-m, --molecule-type`: Filter by molecule type (e.g., "genomic DNA")
+- `--api-key`: NCBI API key for higher rate limit
+- `--email`: Email for NCBI request tracking
 
 #### Fetch Genome from NCBI
 
@@ -258,13 +334,49 @@ cargo build --release
 ./target/release/bit-pop fetch \
   --accession NC_000913.3 \
   -o index.bitpop
+
+# Output FASTA instead of building index
+./target/release/bit-pop fetch \
+  --accession NC_000913.3 \
+  -o output.fasta \
+  --fasta-only
+
+# With auto-k, custom cache, force re-download
+./target/release/bit-pop fetch \
+  --accession NC_000913.3 \
+  -o index.bitpop \
+  --auto-k \
+  --cache-dir ./cache \
+  --force
 ```
 
 #### Update Cached Genomes
 
 ```bash
 ./target/release/bit-pop update
+
+# Check specific index for updates
+./target/release/bit-pop update \
+  -i index.bitpop
+
+# Force update all genomes
+./target/release/bit-pop update \
+  --force \
+  --cache-dir ./cache
+
+# With API key and email
+./target/release/bit-pop update \
+  --force \
+  --api-key YOUR_API_KEY \
+  --email user@example.com
 ```
+
+**Parameters:**
+- `-i, --index`: Check specific index (default: all cached)
+- `--force`: Force re-download all genomes
+- `--cache-dir`: Custom cache directory (default: ~/.cache/bitpop)
+- `--api-key`: NCBI API key for higher rate limit
+- `--email`: Email for NCBI request tracking
 
 #### EM Post-Processing
 
@@ -278,16 +390,367 @@ Apply Expectation-Maximization algorithm to improve multi-candidate SAM mappings
   --convergence 0.001 \
   --max-iterations 20 \
   --temperature 0.1 \
-  --top-k 30
+  --top-k 10
+
+# With confidence threshold (recommended for near-identical strains)
+./target/release/bit-pop em \
+  -i mapped.sam \
+  -o em_mapped.sam \
+  --convergence 0.001 \
+  --max-iterations 50 \
+  --temperature 0.1 \
+  --top-k 10 \
+  --confidence-threshold 0.95
 ```
 
-**What it does**: When a read maps to multiple genomes with similar scores, EM uses population-level abundance signals to reassign reads to the most likely genome. Typically converges in 9-11 iterations (~0.13s on 18K reads).
+**What it does**: When a read maps to multiple genomes with similar scores, EM uses population-level abundance signals to reassign reads to the most likely genome. Typically converges in 9-11 iterations (~0.13s on 18K reads). On CAMI dataset, EM with `t=0.1, ct=0.95` adds **+0.29% accuracy** over baseline.
 
 **Parameters**:
 - `--convergence`: KL divergence threshold for stopping (default: 0.001)
-- `--max-iterations`: Maximum EM iterations (default: 20)
+- `--max-iterations`: Maximum EM iterations (default: 50)
 - `--temperature`: Softmax temperature for probability smoothing (default: 0.1)
-- `--top-k`: Number of top candidates per read (default: 30)
+- `--top-k`: Number of top candidates per read for EM (default: 10)
+- `--confidence-threshold`: Minimum probability to apply EM reassignment (default: 0.0)
+
+#### Multi-K Consensus Mapping
+
+Combine multiple indexes with different k-mer sizes for improved strain resolution:
+
+```bash
+# Multi-k consensus (k=8 + k=10 + k=12)
+./target/release/bit-pop consensus \
+  -i index_k8.bitpop:8 -i index_k10.bitpop:10 -i index_k12.bitpop:12 \
+  -r reads.fastq \
+  -o output.sam \
+  -t 4
+
+# With top-N candidates (recommended for strain resolution)
+./target/release/bit-pop consensus \
+  -i index_k8.bitpop:8 -i index_k10.bitpop:10 -i index_k12.bitpop:12 \
+  -r reads.fastq \
+  -o output.sam \
+  --top-n 4 \
+  -t 16
+
+# Streaming mode (for huge FASTQ files, limits RAM usage)
+./target/release/bit-pop consensus \
+  -i index_k8.bitpop:8 -i index_k10.bitpop:10 -i index_k12.bitpop:12 \
+  -r large_reads.fastq \
+  -o output.sam \
+  --stream \
+  --max-ram 32G \
+  -t 16
+
+# With SNP detection
+./target/release/bit-pop consensus \
+  -i index_k8.bitpop:8,index_k10.bitpop:10 \
+  -r reads.fastq \
+  -o output.sam \
+  --snp-detect \
+  --snp-min-support 3 \
+  --snp-penalty 0.1
+
+# With chunked long-read support
+./target/release/bit-pop consensus \
+  -i index_k10.bitpop:10 \
+  -r reads.fastq \
+  -o output.sam \
+  --chunk-size 86 \
+  --chunk-pct 0.0 \
+  --chunk-min 50 \
+  --chunk-max 200
+```
+
+**K-Priority Weighting**: By default, consensus uses **k-priority weighting** where larger k-values get higher weight (`weight = k / min_k`). For k=8/10/12: weights are 1.0x, 1.25x, 1.5x respectively.
+
+**Parameters**:
+- `-i, --indexes`: List of `index:k` pairs (comma-separated, required)
+- `-r, --reads`: Reads file (FASTQ, required)
+- `-o, --output`: Output SAM file (required)
+- `--strategy`: Voting strategy: `weighted_score` (default) or `majority`
+- `--min-score`: Minimum alignment score threshold (default: 0.5)
+- `--chunk-size`: Chunk size for long reads (default: 86)
+- `--chunk-pct`: Chunk size as percentage (default: 0.0)
+- `--chunk-min`: Minimum chunk size in bp (default: 50)
+- `--chunk-max`: Maximum chunk size in bp (default: 200)
+- `--snp-detect`: Enable SNP detection (default: false)
+- `--snp-min-support`: SNP minimum support count (default: 3)
+- `--snp-penalty`: SNP penalty value (default: 0.1)
+- `--min-k-mappings`: Minimum k-values that must find a mapping (default: 1)
+- `-t, --threads`: Number of threads (default: 1)
+- `--top-n`: Number of top candidates to output per read (0 = only winner, default: 1)
+- `--stream`: Process reads in chunks to limit memory usage (enables streaming mode)
+- `--max-ram`: Max RAM to use for streaming (e.g., "32G", "16GB"). Auto-calculates optimal chunk size. Default: uses available system memory.
+- `--two-pass`: Enable two-pass mapping — unmapped reads are re-mapped with a lower threshold, then refined with EM algorithm
+- `--second-pass-score`: Minimum score threshold for second pass (default: 0.4, range: 0.0-1.0). Lower values map more reads but may introduce false positives. Recommended: 0.4 for best accuracy/recall trade-off
+- `--diagnose-unmapped`: Sample 1000 unmapped reads and report why they failed (useful for debugging index/parameter issues)
+
+#### Multi-K Consensus — Python Script
+
+For faster multi-k consensus, use the standalone Python script which calls `bit-pop map` for each index separately, then combines results. This is **faster than built-in consensus** because it uses the optimized standalone map engine:
+
+```bash
+# Build indexes with different k values
+bit-pop build -f genomes/ -o cami_k10.bitpop -k 10
+bit-pop build -f genomes/ -o cami_k13.bitpop -k 13
+
+# Run consensus via Python script
+python scripts/consensus_base.py \
+  --indexes cami_k10.bitpop,cami_k13.bitpop \
+  --reads reads.fastq \
+  --output consensus.sam \
+  --strategy weighted_score \
+  --threads 16
+```
+
+**Performance comparison** (~1M reads, CAMI, 61 genomes):
+
+| Method | Mapped | Mapping Rate | Accuracy | Time |
+|--------|--------|--------------|----------|------|
+| k13 alone | 69,788 | 69.8% | 89.80% | 44s |
+| k14 alone | 74,616 | 74.6% | 88.90% | 46s |
+| **k14+k13 consensus** | **792,522** | **79.3%** | **89.85%** | **~100s** |
+| k14+k13+k12 consensus | 860,764 | 86.1% | 87.87% | ~150s |
+| k14+k13+k15 consensus | 875,006 | 87.6% | 87.40% | ~150s |
+
+**Winner**: k14+k13 gives **+100k mapped reads** vs k13 alone with **+0.05% accuracy**. Adding more k values increases recall but decreases accuracy.
+
+**Why use the Python script**: Built-in consensus uses `map_read()` in a parallel iterator, which is slower than the standalone `map` command. The Python script calls `bit-pop map` for each index, achieving better performance.
+
+#### Chunk-Consensus Mapping
+
+Use a single index with multiple chunk-% configurations and require voting agreement for higher accuracy:
+
+```bash
+# 3 chunk-% configs: 1%, 10%, 50%
+./target/release/bit-pop chunk-consensus \
+  -i index.bitpop \
+  -c 0.01,0.10,0.50 \
+  -r reads.fastq \
+  -o output.sam \
+  -t 8
+
+# Custom min agreement (2 out of 3 configs must agree)
+./target/release/bit-pop chunk-consensus \
+  -i index.bitpop \
+  -c 0.01,0.10,0.50 \
+  -r reads.fastq \
+  -o output.sam \
+  --min-agreement 2 \
+  --strategy majority \
+  -t 8
+
+# Weighted scoring (lower chunk-% → higher weight)
+./target/release/bit-pop chunk-consensus \
+  -i index.bitpop \
+  -c 0.01,0.10,0.50 \
+  -r reads.fastq \
+  -o output.sam \
+  --strategy weighted_score \
+  -t 8
+```
+
+**Concept**: Smaller chunks (1%) map more reads but with lower accuracy. Larger chunks (50%) map fewer reads but with higher accuracy. Chunk-consensus requires a read to map to the **same genome** in at least N configs (default: majority = N/2+1), trading mapping rate for accuracy higher than any single configuration.
+
+**Parameters**:
+- `-i, --index`: Index file (.bitpop, required)
+- `-c, --chunk-pcts`: Chunk percentages as fractions, comma-separated (e.g. "0.01,0.10,0.50", required)
+- `-r, --reads`: Reads file (FASTQ, required)
+- `-o, --output`: Output SAM file (required)
+- `--strategy`: Voting strategy: `majority` (default) or `weighted_score`
+- `--min-score`: Minimum alignment score threshold (default: 0.5)
+- `--min-agreement`: Minimum configs that must agree (default: majority = N/2+1)
+- `--chunk-min`: Minimum chunk size in bp (default: 50)
+- `--chunk-max`: Maximum chunk size in bp (default: 200)
+- `-t, --threads`: Number of threads (default: 1)
+- `--top-n`: Number of top candidates per read (default: 1)
+
+**SAM tags** (chunk-consensus specific):
+
+| Tag | Type | Description |
+|-----|------|-------------|
+| `CP{pct}:Z:{name}/{score}` | string | Per-config result (e.g. `CP1:Z:Ecoli/0.9200`) |
+| `CV:Z:{name}` | string | Final consensus genome |
+| `CC:i:{n}` | integer | Total configs that found a mapping |
+| `VC:i:{n}` | integer | Vote count (configs agreeing on winner) |
+| `AS:f:{score}` | float | Consensus score |
+| `XS:f:{score}` | float | Suboptimal score (supplementary only) |
+
+**Example SAM line:**
+```
+read1   0       Ecoli     101     57      50M     *       0       0       ACGT...  *  NM:i:2  CP1:Z:Ecoli/0.9200  CP10:Z:Ecoli/0.8800  CP50:Z:Ecoli/0.9500  CV:Z:Ecoli  CC:i:3  VC:i:3  AS:f:0.9167
+```
+
+#### Taxonomic Classification Report
+
+Generate taxonomic abundance profiles from SAM output using NCBI taxonomy tree with Lowest Common Ancestor (LCA) algorithm:
+
+```bash
+# Download NCBI taxonomy (once)
+# https://ftp.ncbi.nlm.nih.gov/pub/taxonomy/taxdump.tar.gz
+# Extract nodes.dmp and names.dmp
+
+# Generate taxonomic report from SAM output
+./target/release/bit-pop tax \
+  -i mapped.sam \
+  --nodes-dmp nodes.dmp \
+  --names-dmp names.dmp \
+  -o taxonomy_report.txt
+
+# JSON output
+./target/release/bit-pop tax \
+  -i mapped.sam \
+  --nodes-dmp nodes.dmp \
+  --names-dmp names.dmp \
+  --format json \
+  -o taxonomy_report.json
+
+# Top 20 entries per rank
+./target/release/bit-pop tax \
+  -i mapped.sam \
+  --nodes-dmp nodes.dmp \
+  --names-dmp names.dmp \
+  --top-n 20
+```
+
+**What it does:**
+Maps genome-level read counts to NCBI taxonomy tree using LCA, producing taxonomic abundance profiles by rank (species, genus, family, phylum, etc.). Automatically resolves ambiguous mappings by finding the lowest common ancestor in the taxonomy tree.
+
+**Example report output:**
+```
+=== Taxonomic Report (150 total reads) ===
+
+FAMILY
+Name                                   Reads        %
+----------------------------------------------------------------
+Enterobacteriaceae                         150    100.0%
+
+GENUS
+Name                                   Reads        %
+----------------------------------------------------------------
+Escherichia                               100     66.7%
+Salmonella                                 50     33.3%
+
+SPECIES
+Name                                   Reads        %
+----------------------------------------------------------------
+Escherichia coli                          100     66.7%
+Salmonella enterica                        50     33.3%
+```
+
+**Parameters:**
+- `-i, --input`: Input SAM file (bit-pop mapping output, required)
+- `--nodes-dmp`: Path to NCBI nodes.dmp file (required)
+- `--names-dmp`: Path to NCBI names.dmp file (required)
+- `-o, --output`: Output file (default: stdout)
+- `--top-n`: Number of top entries per rank (default: 10)
+- `--format`: Output format: `text` (default), `json`
+
+## SAM/BAM Output Format
+
+Bit-Pop produces standard SAM 1.6 output (text) or BAM 1.6 output (binary, BGZF-compressed) with additional optional tags for enhanced analysis. Use `--bam` flag for BAM output.
+
+**SAM vs BAM**: BAM is the binary, compressed version of SAM. It contains the same data but is smaller and faster to read/write. Both formats are compatible with samtools, bcftools, IGV, and other bioinformatics tools.
+
+### Standard SAM Fields
+
+| Field | Description |
+|-------|-------------|
+| QNAME | Read name |
+| FLAG | SAM flag (0, 4=UNMAPPED, 16=REVERSE, 2048=SUPPLEMENTARY) |
+| RNAME | Reference genome name |
+| POS | 1-based mapping position |
+| MAPQ | Mapping quality (score × 60) |
+| CIGAR | Alignment operations (M, X for XOR; M, I, D for Smith-Waterman; S for soft-clipping; I/D/S for chain mode gaps) |
+| RNEXT/PNEXT/TLEN | Pair information (paired-end mode) |
+| SEQ | Read sequence |
+| QUAL | Quality string (quality-aware mode) |
+
+### Optional Tags
+
+| Tag | Type | Description |
+|-----|------|-------------|
+| `NM:i:` | integer | Edit distance (mismatches + insertions from CIGAR) |
+| `AS:f:` | float | Alignment score (0.0-1.0, raw, before rarity weighting) |
+| `MD:Z:` | string | Mismatching bases string (e.g., "10A5T3" = 10 matches, mismatch A, 5 matches, mismatch T, 3 matches) |
+| `RK:f:` | float | K-mer rarity score (1 / occurrence_count of read's first k-mer) |
+| `HF:f:` | float | Homopolymer fingerprint similarity (0.0-1.0, only when `--hf` enabled) |
+| `GM:f:` | float | Gaussian insert size confidence (0.0-1.0, paired-end only, higher = more plausible insert size) |
+| `XS:f:` | float | Suboptimal score (supplementary mappings only) |
+| `MQ:f:` | float | Quality penalty (quality-aware mode only) |
+
+### Example SAM Line
+
+```
+read1   0       chr1    101     57      50M     *       0       0       ACGTACGT...  *  NM:i:2  MD:Z:20A10T15  AS:f:0.9500  RK:f:0.001000  GM:f:0.8523  HF:f:0.8723
+read1   2048    chr2    200     48      50M     *       0       0       ACGTACGT...  *  NM:i:3  MD:Z:15G20C10  AS:f:0.8000  RK:f:0.003000  GM:f:0.1205  HF:f:0.4521  XS:f:0.8000
+```
+
+### MD Tag — samtools/bcftools Compatibility
+
+The `MD:Z:` tag enables full compatibility with the standard bioinformatics ecosystem.
+
+**Native BAM output**: Use `--bam` flag to output BAM directly (no samtools conversion needed):
+
+```bash
+# Native BAM output
+bit-pop run genome.fna reads.fastq -o output.bam --bam
+
+# Or convert SAM to BAM (if using SAM output)
+samtools view -b mapped.sam | samtools sort -o mapped.bam
+samtools index mapped.bam
+
+# SNP calling with bcftools
+samtools mpileup -f reference.fasta mapped.bam | bcftools call -mv -o variants.vcf
+
+# Visualize in IGV (MD tag enables base-level verification)
+igv mapped.bam
+```
+
+**Why this matters:** Without the MD tag, tools like `samtools mpileup` and `bcftools call` cannot distinguish true mutations from sequencing errors. The MD tag specifies exactly which bases differ from the reference at each position, enabling:
+- **SNP calling** — identify variants with bcftools/GATK
+- **Base-level verification** — IGV shows mismatches in red with MD confirmation
+- **Pileup analysis** — mpileup uses MD to count matches/mismatches per position
+- **Cross-tool compatibility** — works with VarScan, FreeBayes, and all SAM-dependent tools
+
+### Quality-Aware Mode Tags
+
+When using quality scores (from FASTQ), an additional tag is included:
+
+| Tag | Type | Description |
+|-----|------|-------------|
+| `MQ:f:` | float | Phred-scaled quality penalty (negative value for high-quality mismatches) |
+
+### EM Post-Processing Output
+
+The `bit-pop em` command reassigns reads based on population-level abundance signals. Output SAM preserves all optional tags (`AS`, `MD`, `RK`, `XS`) and updates:
+- `RNAME` — changed if EM reassigns read to different genome
+- `MAPQ` — set to 40 for reassigned reads
+
+### Score Interpretation
+
+| Tag | Range | Meaning |
+|-----|-------|---------|
+| `AS:f:` | 0.0–1.0 | Pure alignment quality (independent of k-mer rarity) |
+| `RK:f:` | 0.0–1.0 | K-mer specificity (higher = rarer = more informative) |
+| `HF:f:` | 0.0–1.0 | Homopolymer fingerprint similarity (only when `--hf` enabled) |
+| `XS:f:` | 0.0–1.0 | Alternative mapping score (supplementary only) |
+
+**Using AS + RK together:**
+| AS | RK | Interpretation |
+|----|-----|----------------|
+| High | High | Strong, specific match — high confidence |
+| High | Low | Good match but common k-mer — repeat region |
+| Low | High | Rare k-mer but poor alignment — likely noise |
+| Low | Low | Poor match, common k-mer — reject |
+
+**Using HF for strain resolution:**
+| AS | HF | Interpretation |
+|----|-----|----------------|
+| High | High | Perfect strain match — high confidence assignment |
+| High | Low | Good alignment but wrong strain — k-mer ambiguity |
+| Low | High | Homopolymer match but poor alignment — partial match |
+| Low | Low | No match — reject |
 
 ### `run` Command Options
 
@@ -308,10 +771,51 @@ Apply Expectation-Maximization algorithm to improve multi-candidate SAM mappings
 | `-q, --min-quality` | Minimum Phred quality (0 = no filter) | 0 |
 | `-t, --threads` | Number of threads | 1 |
 | `--top-n` | Top N rarest k-mer anchors (higher = better mapping rate, slower) | 1 |
+| `--reconcile-top-n` | Top N candidates per read for discordant pair reconciliation (paired-end only) | 5 |
 | `--mmap` | Use memory-mapped FASTA loading | false |
 | `--force` | Force rebuild index | false |
 | `--method` | Fuzzy k-mer method: none, fuzzy-kmer, fuzzy-seed, neighborhood | none |
 | `--fuzzy-mismatches` | Max mismatches for fuzzy matching | 1 |
+| `--spaced-seed-pattern` | Custom spaced seed pattern string | None |
+| `--golden-anchors` | Quality-weighted k-mer anchors for long reads | false |
+| `--chunk-size` | Chunk size for PacBio long-read mapping | None |
+| `--chunk-pct` | Chunk size as percentage of read length | None |
+| `--chunk-min` | Minimum chunk size clamp | None |
+| `--chunk-max` | Maximum chunk size clamp | None |
+| `--chunk-vote-threshold` | Minimum fraction of chunks that must agree | None |
+| `--chunk-top-n` | Number of top genomes to return per read in chunk mode | None |
+| `--snp-detect` | Enable SNP-aware scoring | false |
+| `--snp-min-support` | Minimum support count for SNP detection | 3 |
+| `--hf` | Enable homopolymer fingerprint scoring | false |
+| `--hf-min` | Minimum run length for homopolymer fingerprint | 3 |
+| `-i, --index` | Use existing .bitpop index (skip genome loading) | (none) |
+| `--em` | Apply EM post-processing after mapping | false |
+| `--search-radius` | Search radius in bp around anchor (±N, default: 5, max: 200) | 5 |
+| `--chunk-strategy` | Chunk anchor strategy: rarest, golden, spaced | rarest |
+| `--api-key` | NCBI API key for higher rate limit | (none) |
+| `--email` | Email for NCBI request tracking | (none) |
+| `--bam` | Output BAM format instead of SAM | false |
+
+### `build` Command Options
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `-f, --fasta` | Input FASTA file(s) (required, can be repeated) | (required) |
+| `-o, --output` | Output index path (required) | (required) |
+| `-k, --k` | K-mer size | 8 |
+| `--auto-k` | Auto-scale k-mer size based on genome size | false |
+| `--read-type` | Read type: short (Illumina) / long (Nanopore/PacBio) | short |
+| `-t, --threads` | Number of threads for parallel build | 1 |
+| `--method` | Fuzzy k-mer method: none, fuzzy-kmer, fuzzy-seed, neighborhood | none |
+| `--fuzzy-mismatches` | Max mismatches for fuzzy matching | 1 |
+| `-s, --spaced-seed` | Enable spaced seed pattern matching | false |
+| `--spaced-seed-pattern` | Custom spaced seed pattern (e.g., "11101001110111") | 11111011111111 |
+| `--cami` | Extract genome name from filename (CAMI mode) | false |
+| `--pacbio` | Extract genome name from filename (PacBio mode) | false |
+| `--search-radius` | Search radius in bp around anchor (±N, default: 5, max: 200) | 5 |
+| `--hf` | Enable homopolymer fingerprint scoring | false |
+| `--hf-min` | Minimum run length for homopolymer fingerprint | 3 |
+| `--mmap` | Use memory-mapped FASTA loading | false |
 
 ### `build` Command — CAMI Dataset Support
 
@@ -333,17 +837,81 @@ This fixes accuracy for CAMI datasets where FASTA headers don't match ground tru
 - `xor`: Fast 2-bit XOR alignment only
 - `sw`: Smith-Waterman refinement for all reads
 - `hybrid`: XOR first, SW only when confidence < 0.9
+- `softclip`: XOR with soft-clipping — slides windows across read to find optimal alignment region, emitting `S` operations in CIGAR for adapter/low-quality regions. Uses two-pass strategy (coarse scan + fine-grained refinement) for O(N * step) performance. Ideal for reads with adapter contamination or spanning repeat boundaries.
+- `chain`: Gap-aware XOR chaining — true long-read alignment for ONT/PacBio. Uses minimizer-based seed chaining with XOR gap extension. Handles 5-15% error rates and long indels natively, replacing chunk-based workaround with proper minimizer chaining (similar to minimap2's approach).
+
+**Soft-clipping example:**
+```
+Read:  |ADAPTER (10bp)|ACTUAL_READ (50bp)|NOISE (5bp)|
+CIGAR: 10S50M5S
+```
+
+**Chain mode vs chunk mode:**
+| Aspect | Chunk mode (old) | Chain mode (new) |
+|--------|------------------|------------------|
+| Approach | Fixed-size chunks + voting | Minimizer seeds + collinear chaining |
+| Gaps/indels | Not handled | Handled via chaining tolerance |
+| Error rate | Works best <5% | Handles 5-15% (ONT/PacBio) |
+| Speed | O(chunks × genomes) | O(minimizers × log(hits)) |
+| CIGAR | Generic M | Detailed M/X/I/D/S |
+
+**Chain mode configuration:**
+```bash
+# Default chain mode (k=15, w=10, min_seeds=3)
+bit-pop map -i index.bitpop -r reads.fastq -a chain
+
+# Custom chain config for high-error ONT data
+bit-pop map -i index.bitpop -r ont_reads.fastq -a chain \
+  --chain-k 15 \
+  --chain-w 10 \
+  --chain-min-seeds 3 \
+  --chain-max-gap 500 \
+  --chain-gap-open -5 \
+  --chain-gap-extend -0.5
+```
+
+### `map` Command Options
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `-i, --index` | Input index path (required) | (required) |
+| `-r, --reads` | Reads file for single-end mode | (none) |
+| `-1, --reads-1` | R1 FASTQ for paired-end | (none) |
+| `-2, --reads-2` | R2 FASTQ for paired-end | (none) |
+| `-o, --output` | Output SAM file (required) | (required) |
+| `-a, --align-mode` | Alignment mode: xor, sw, hybrid | xor |
+| `-m, --min-score` | Minimum alignment score (0.0-1.0) | 0.7 |
+| `-q, --min-quality` | Minimum Phred quality (0 = no filter) | 0 |
+| `-t, --threads` | Number of threads | 1 |
+| `--top-n` | Top N rarest k-mer anchors | 1 |
+| `--reconcile-top-n` | Top N candidates per read for discordant pair reconciliation (paired-end only) | 5 |
+| `--method` | Fuzzy k-mer method: none, fuzzy-kmer, fuzzy-seed, neighborhood | none |
+| `--fuzzy-mismatches` | Max mismatches for fuzzy matching | 1 |
+| `-s, --spaced-seed` | Enable spaced seed matching | false |
+| `--spaced-seed-pattern` | Custom spaced seed pattern | 11111011111111 |
+| `--golden-anchors` | Use golden anchor selection (quality-weighted) | false |
+| `--em` | Apply EM post-processing after mapping | false |
+| `--search-radius` | Search radius in bp around anchor (±N, default: 5, max: 200) | 5 |
+| `--chunk-size` | Chunk size for PacBio long-read mapping | 0 (auto) |
+| `--chunk-pct` | Chunk size as percentage of read length (0.0-1.0) | 0.0 |
+| `--chunk-min` | Minimum chunk size clamp for dynamic chunking | 50 |
+| `--chunk-max` | Maximum chunk size clamp for dynamic chunking | 200 |
+| `--chunk-vote-threshold` | Minimum fraction of chunks that must agree (0.0-1.0) | 0.0 |
+| `--chunk-top-n` | Number of top genomes per read in chunk mode | 1 |
+| `--chunk-strategy` | Chunk anchor strategy: rarest, golden, spaced | rarest |
+| `--snp-detect` | Enable SNP-aware scoring | false |
+| `--snp-min-support` | Minimum support count for SNP detection | 3 |
+| `--hf` | Enable homopolymer fingerprint scoring | false |
+| `--hf-min` | Minimum run length for homopolymer fingerprint | 3 |
+| `--bam` | Output BAM format instead of SAM | false |
 
 ## Benchmark Results
 
-### Setup
+### 3-Genome Benchmark (Simulated Reads)
 
-- **Genomes**: E. coli K-12 MG1655 (4.6 Mb), S. aureus (2.9 Mb), S. cerevisiae (12.2 Mb)
-- **Reads**: 20,000 simulated reads (100 bp, 0.1% error rate, Q30-Q40)
-- **k-mer size**: k=10
-- **Hardware**: Standard desktop CPU (Windows, PowerShell)
+**Setup**: E. coli K-12 MG1655 (4.6 Mb), S. aureus (2.9 Mb), S. cerevisiae (12.2 Mb). 20,000 simulated reads (100 bp, 0.1% error rate, Q30-Q40). k=10. Standard desktop CPU.
 
-### Results (k=10, top_n=1)
+#### Results (k=10, top_n=1)
 
 | Genome | Size | Mapped | Mapping Rate | Accuracy |
 |--------|------|--------|--------------|----------|
@@ -352,7 +920,7 @@ This fixes accuracy for CAMI datasets where FASTA headers don't match ground tru
 | S. cerevisiae | 12.2 Mb | 4,905/5,000 | 98.1% | 100.0% |
 | **Total** | **19.7 Mb** | **19,570/20,000** | **97.9%** | **99.9%** |
 
-### Results (k=10, top_n=3)
+#### Results (k=10, top_n=3)
 
 | Genome | Size | Mapped | Mapping Rate | Accuracy |
 |--------|------|--------|--------------|----------|
@@ -365,52 +933,111 @@ This fixes accuracy for CAMI datasets where FASTA headers don't match ground tru
 
 **Throughput**: ~1,500 reads/second (top_n=1)
 
-### CAMI Low Complexity Benchmark (62 Genomes)
+### CAMI Low Complexity Benchmark (62 Genomes, 1M Reads)
 
-Benchmark on the CAMI I Low Complexity dataset — 20K reads across 62 microbial genomes including highly similar strains.
+**Setup**: 61 genomes (1900 sequences, ~157M bases, ~1.3GB index). ~1M reads sampled from original 30GB CAMI dataset. k=10, 16 threads, `--cami` flag for genome naming.
 
-**Setup**: 62 genomes (1880 sequences, ~1.4 GB index), 20K reads (2x150bp Illumina), k=10, top_n=2, 8 threads, `--cami` flag for genome naming
+#### Top-N Series (xor alignment, k=10)
 
-| Metric | Value |
-|--------|-------|
-| Mapping rate | 92.02% (30,105/40,000 paired-end reads) |
-| Overall accuracy | 85.87% |
-| Time | ~60s per 10k reads |
+| Config | Mapped | Mapping Rate | Accuracy | Time |
+|--------|--------|--------------|----------|------|
+| xor top-n 1 | 638,704 (63.9%) | 63.9% | 86.15% | 129s |
+| xor top-n 2 | 748,711 (74.9%) | 74.9% | 86.31% | 189s |
+| xor top-n 3 | 813,874 (81.4%) | 81.4% | 86.41% | 250s |
+| xor top-n 4 | 861,762 (86.2%) | 86.2% | 86.48% | 132s |
+| xor top-n 5 | 712,720 (71.3%) | 71.3% | 86.50% | ~300s |
+| xor top-n 6 | 511,411 (51.2%) | 51.2% | 86.57% | ~300s |
 
-**Breakdown by genome type**:
+#### EM Post-Processing (on top-n 4)
 
-| Genome Type | Count | Accuracy |
-|-------------|-------|----------|
-| Numeric genomes (e.g. 1036554) | ~8,000 | 85.49% |
-| other | ~8,000 | 88.27% |
-| Sample* genomes (single-contig) | ~2,000 | 91.33% |
-| evo_* genomes (similar strains) | ~16,202 | 58.4% |
+| Config | Mapped | Accuracy | Time |
+|--------|--------|----------|------|
+| xor tn=4 | 861,762 | 86.48% | 132s |
+| xor tn=4 + EM (t=0.1) | 857,992 | 86.58% | ~132s |
+| **xor tn=4 + EM (t=0.1, ct=0.95)** | **857,992** | **86.77%** | **~132s** |
+| xor tn=4 + EM (t=0.5, ct=0.95) | 857,992 | 85.29% | ~132s |
 
-**With EM post-processing** (Rust EM v2, temperature=0.1, top-k=30, confidence=0.95):
+#### Two-Pass Mapping (re-maps unmapped reads with lower threshold + EM)
 
-| Metric | Baseline | + EM | Delta |
-|--------|----------|------|-------|
-| Overall accuracy | 85.87% | ~86.5% | +0.6pp |
-| evo_* accuracy | 58.4% | **59.8%** | **+1.4pp** |
+Two-pass mapping recovers reads that fail the initial 0.7 threshold by re-mapping them with a lower threshold, then refining with EM. Best at threshold 0.4:
 
-**EM limitation on near-identical strains**: Detailed analysis of evo_* reads shows EM improves classification by +1.4pp on near-identical strains (>99.9% ANI). EM fixes 805 wrong predictions but breaks 755 correct ones (net +50). This confirms the limitation is **fundamentally information-theoretic, not algorithmic** — abundance signal is insufficient to disambiguate sibling strains that share >99.9% of their k-mers. The `--confidence-threshold 0.95` parameter prevents EM from breaking high-confidence correct predictions.
+| Config | Mapped | Accuracy | Correct | Wrong |
+|--------|--------|----------|---------|-------|
+| xor tn=4 | 49,028 | 86.52% | 42,421 | 6,607 |
+| xor tn=4 + 2pass (0.5) | 49,071 | 86.48% | 42,436 | 6,635 |
+| **xor tn=4 + 2pass (0.4) + EM** | **49,929** | **85.33%** | **42,604** | **7,325** |
+| xor tn=4 + 2pass (0.3) + EM | 50,000 | 85.08% | 42,540 | 7,460 |
 
-**Paired-end conflicts**: 35.5% of read pairs have R1 and R2 mapping to different genomes, reducing effective accuracy.
+**Trade-off**: Two-pass gains +183 correct reads at the cost of +718 wrong reads. Use when maximizing recall is more important than precision.
 
-**Why is overall accuracy lower than single-genome benchmarks?** The evo_* genomes are >99.9% identical strains from the same sample assembly. They share most k-mers with each other, causing reads to map to the wrong strain. This is a fundamental limitation of k-mer-based classification for near-identical genomes, not a bug. SNP-aware weighting or ML would be required for strain-level resolution.
+#### 🏆 Best Configuration
+
+| Goal | Config | Mapped | Mapping Rate | Accuracy | Time |
+|------|--------|--------|--------------|----------|------|
+| **Best accuracy** | k14+k13 consensus | 792,522 | 79.3% | **89.85%** | ~100s |
+| **Best coverage** | xor tn=4 + EM (t=0.1, ct=0.95) | 857,992 | 85.8% | 86.77% | ~132s |
+
+#### Per-Genome Accuracy Breakdown (xor top-n 4)
+
+- Numeric genomes (1030752, 1036554, etc.): **99-100%**
+- Sample genomes: **100%**
+- 1052944, 1053058: **40-48%** (similar genomes)
+- evo_* strains: **46-92%** (near-identical, fundamental limitation)
+  - evo_1035930.011: 90.97%
+  - evo_1035930.029: 59.04%
+  - evo_1035930.032: 55.72%
+  - evo_1049056.011: 56.01%
+  - evo_1049056.013: 46.87%
+  - evo_1049056.015: 52.46%
+  - evo_1286_AP.008: 92.26%
+  - evo_1286_AP.026: 69.65%
+  - evo_1286_AP.033: 54.32%
+  - evo_1286_AP.037: 47.25%
+
+#### Unmapped Reads Analysis
+
+**137,700 unmapped reads** (13.8% of 999K FASTQ reads). Parent genomes (1139_AG, 1220_AD, 1030752) have **2x higher unmapped rate** (18-19%) vs evo_* strains (9-10%). Cause: larger genomes → more repetitive regions → more common k-mers → reads fail k-mer rarity threshold.
+
+**Diagnosis**: Use `--diagnose-unmapped` to sample 1000 unmapped reads and report why they failed. Common causes:
+- `K-mers in index, alignment failed` — read has matching k-mers but alignment score below threshold (use `--two-pass` to recover)
+- `No k-mers in index` — read sequence not represented in reference genomes
+- `All k-mers too repetitive` — k-mers appear too many times to be useful anchors
+
+#### Key Findings
+
+1. **`--top-n` is the only flag that significantly affects accuracy** — growth is linear but slow (+0.16% for tn1→tn2, +0.07% for tn4→tn5)
+2. **Mapping rate is fixed per top-n** — other flags do not change how many reads map
+3. **All "advanced" flags** (HF, SNP, golden, spaced-seed, search-radius, chunk-strategy) **have no effect** on accuracy
+4. **Spaced seeds are catastrophic** — only 413-807 mapped reads (vs 748K baseline)
+5. **SW mode is too slow** — timeout after 600s
+6. **Diminishing returns** from tn=5 onward — mapped count drops drastically (712K→511K)
+7. **EM adds +0.29% accuracy** via reassignment within strain groups, consolidating reads into a single "winner" per strain group
+8. **EM pattern**: For competing evo_* genomes, one gets 90%+ accuracy, others drop to 0-10%
+9. **Two-pass mapping** (`--two-pass`) recovers unmapped reads at threshold 0.4: +183 correct reads, +718 wrong reads, 99.9% mapping rate
+10. **Two-pass threshold**: 0.4 is optimal — 0.5 maps too few additional reads, 0.3 maps all but adds more false positives
+11. **Multi-k consensus: k14+k13 is optimal** — 89.85% accuracy, 79.3% recall. Adding more k values increases recall but decreases accuracy
+12. **Unmapped reads are not "on the edge"** — scores of 0.35-0.49, far below 0.7 threshold. These are strain variants not in the reference
+
+#### Why is overall accuracy lower than single-genome benchmarks?
+
+The evo_* genomes are >99.9% identical strains from the same sample assembly. They share most k-mers with each other, causing reads to map to the wrong strain. This is a **fundamental limitation** of k-mer-based classification for near-identical genomes, not a bug. SNP-aware weighting or ML would be required for strain-level resolution.
 
 **See**: [docs/paper.pdf](docs/paper.pdf) for detailed analysis.
 
 ## Project Structure
 
 ```
-├── src/                    # Rust source code (15 modules)
-│   ├── main.rs             # CLI entry point (9 subcommands)
+├── src/                    # Rust source code (17 modules)
+│   ├── main.rs             # CLI entry point (12 subcommands)
 │   ├── lib.rs              # Core library (BitPop struct, DNA encoding)
 │   ├── fm.rs               # FM-index (SA-IS, BWT, backward search)
 │   ├── align.rs            # Alignment (XOR, SW, Myers)
 │   ├── sam.rs              # SAM output format
 │   ├── em.rs               # EM post-processing algorithm
+│   ├── taxonomy.rs         # NCBI taxonomy tree + LCA algorithm
+│   ├── consensus.rs        # Multi-k consensus mapping
+│   ├── chunk_consensus.rs  # Multi chunk-% consensus voting
+│   ├── snp.rs              # SNP detection and scoring
 │   ├── fasta.rs            # FASTA parsing + memory-mapped reader
 │   ├── fastq.rs            # FASTQ parsing + quality filtering
 │   ├── rank.rs             # Multi-genome ranking
@@ -420,13 +1047,17 @@ Benchmark on the CAMI I Low Complexity dataset — 20K reads across 62 microbial
 │   ├── delta.rs            # Delta encoding + VLI compression
 │   ├── persisted.rs        # Advanced persistence (memmap2, format v5)
 │   └── serialize.rs        # Binary serialization
+├── bin/                    # Additional CLI tools
+│   └── extract_seqs.rs     # Extract genome sequences from .bitpop index
 ├── benches/                # Criterion benchmarks (17 benchmark groups)
 ├── tests/                  # Integration tests (5 tests)
 ├── scripts/
-│   ├── simulate_reads.py   # Read simulation (Biopython)
+│   ├── simulate_reads.py       # Read simulation (Biopython)
 │   ├── analyze_benchmark_new.ps1 # Benchmark analysis
-│   ├── bitpop-workflow.py  # Multi-index workflow tool
-│   └── em_classifier.py    # Python EM prototype (reference implementation)
+│   ├── bitpop-workflow.py      # Multi-index workflow tool
+│   ├── consensus_base.py       # Multi-k consensus (calls standalone map, faster than built-in)
+│   ├── cami_accuracy.py        # Evaluate SAM accuracy against CAMI ground truth
+│   └── em_classifier.py        # Python EM prototype (reference implementation)
 ├── data/
 │   ├── genomes/            # Reference genomes (.fna, .fasta)
 │   └── reads/              # Sequencing reads (.fastq)
@@ -466,17 +1097,16 @@ cargo bench
 ```
 
 **Test coverage:**
-- 263+ unit tests (alignment, indexing, serialization, SAM output, spaced seeds, delta encoding, persistence, EM algorithm)
+- 312+ unit tests (alignment, indexing, serialization, SAM output, spaced seeds, delta encoding, persistence, EM algorithm, taxonomy, chain mode)
 - 5 integration tests (build, map, multi-genome, SAM format, cache reuse)
 - 17 Criterion benchmark groups (XOR, SW, Myers, FM-index, k-mer filter, full pipeline)
 
 ## Limitations
 
-- Research tool; not validated on large-scale real datasets or clinical use
-- No clinical validation; academic research tool only
-- Index file sizes ~152MB for 19.7Mb genome (delta compression planned)
+- Research tool; not validated for clinical use
+- Index file sizes ~152 MB for 19.7 Mb genome
 - Chunked reads (>31bp) use generic CIGAR without per-base mismatch detail
-- **Strain-level resolution**: Genomes that are >99.9% identical (same sample, different strains) share most k-mers. Reads may map to the wrong strain or to a parent genome. This is a fundamental limitation of k-mer rarity-based classification, not a bug. Requires SNP-aware weighting or ML for resolution.
+- **Strain-level resolution**: Genomes that are >99.9% identical (same sample, different strains) share most k-mers. Reads may map to the wrong strain. This is a **fundamental information-theoretic limitation** of k-mer rarity-based classification, not a bug. EM post-processing can consolidate reads within strain groups (+0.29% accuracy) but cannot fully resolve sibling strains that share >99.9% of their k-mers. SNP-aware weighting or ML would be required for full strain-level resolution.
 
 ## Large Genome Support
 
@@ -511,26 +1141,32 @@ python scripts/bitpop-workflow.py merge mapped/ -o final.sam
 ## Development Roadmap
 
 ### ✅ Completed
+
 - **Phase 0**: Critical bug fixes (rarity calculation, TLEN, BWT serialization, panic fixes)
 - **Phase 1.1**: Top-N rarest k-mer anchors (97.9% → 99.3% mapping rate)
 - **Phase 1.2**: Reverse complement support with SAM FLAG 0x10
 - **Phase 1.3**: Paired-end support with full SAM compliance
-- **Phase 1.1 (extended)**: Spaced seeds for high-error reads
-- **Phase 1.2 (extended)**: Adaptive k-mer size (`--auto-k`, `--read-type`)
 - **Phase 1.4**: Myers edit distance (23-54x faster than Smith-Waterman)
 - **Phase 2.1**: Memory-mapped FASTA (`--mmap`)
 - **Phase 2.2**: Parallel index build (rayon)
 - **Phase 3.1**: Progress reporting (CLI progress bars)
+- **Phase 4**: CAMI Low Complexity benchmark (61 genomes, ~1M reads, 89.85% accuracy)
 - **Phase 6**: NCBI E-utilities integration (search, fetch, update commands)
 - **Phase 7**: Large genome workaround (`bitpop-workflow.py`)
 - **UX**: `run` command with auto-index caching and smart defaults
 - **Tests**: Integration test suite (5 tests)
-- **Phase 4**: CAMI Low Complexity benchmark (62 genomes, 20K reads, 92.02% mapping rate, 85.87% accuracy)
+- **Paired-end**: Discordant pair reconciliation — resolves R1/R2 cross-genome conflicts via top-N candidate overlap
+- **BAM output**: Native binary alignment map format with BGZF compression (`--bam` flag)
+- **Taxonomic classification**: NCBI taxonomy tree with LCA algorithm (`bit-pop tax` command)
+- **Gaussian insert size model**: Probabilistic paired-end classification using normal distribution of observed insert sizes
+- **EM post-processing**: Expectation-Maximization for multi-candidate refinement (+0.29% on CAMI)
 
 ### 🔧 In Progress
-- **EM refinement**: Multi-k consensus (k=8 + k=10 + k=12) for improved strain resolution
+
+- **Strain resolution**: Investigating approaches for >99.9% identical genomes
 
 ### 📋 Planned
+
 - **Phase 2**: SA compression, streaming input, SIMD acceleration (AVX2)
 - **Phase 3**: CIGAR accuracy improvements, quality filter enhancements
 - **Phase 5**: Read caching, enhanced statistics, API documentation (docs.rs)
@@ -538,9 +1174,10 @@ python scripts/bitpop-workflow.py merge mapped/ -o final.sam
 - **Strain resolution**: Multi-k consensus, long-read support (PacBio/ONT), known SNP (VCF) integration
 
 ### 📊 Expand Benchmarks
+
 - 100+ genomes and eukaryotic genomes
 - Direct comparison with Bowtie2, BWA-MEM on multi-genome tasks
-- CAMI Low Complexity: completed (62 genomes, 20K reads, 85.87% accuracy)
+- CAMI Low Complexity: completed (61 genomes, ~1M reads, 89.85% accuracy)
 
 ## Getting Help
 

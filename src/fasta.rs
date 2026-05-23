@@ -122,6 +122,7 @@ impl MmapFastaReader {
     }
 
     /// Read the next (header, sequence) pair from the memory-mapped FASTA file.
+    #[expect(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<io::Result<(String, String)>> {
         let first_line = if let Some(line) = self.lookahead.take() {
             line

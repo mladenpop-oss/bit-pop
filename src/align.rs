@@ -56,7 +56,7 @@ pub fn two_bit_align(pattern: &[u8], text: &[u8]) -> (f64, String, usize) {
 
 /// Build CIGAR string from XOR result.
 /// Scans 2-bit pairs: 0 = match (M), non-zero = mismatch (X).
-fn build_cigar_from_xor(xor_val: u64, len: usize) -> String {
+pub fn build_cigar_from_xor(xor_val: u64, len: usize) -> String {
     let mut cigar = String::with_capacity(len * 2 + 2);
     let mut ops: Vec<(u8, usize)> = Vec::new(); // (M=0, X=1) -> count
 
@@ -837,7 +837,32 @@ fn compute_quality_aware_score_at(xor_val: u64, len: usize, read_qual: &[u8]) ->
     (raw_score, mismatch_penalty)
 }
 
+/// Compute quality-aware score for direct comparison (no sliding window).
+fn compute_quality_aware_score_direct(pattern: &[u8], text: &[u8], read_qual: &[u8]) -> (f64, f64) {
+    let len = pattern.len().min(text.len());
+    let mut matches = 0usize;
+    let mut mismatch_penalty = 0.0f64;
+
+    for i in 0..len {
+        let xor = (pattern[i] as u64) ^ (text[i] as u64);
+        let is_match = (xor & 3) == 0;
+
+        if is_match {
+            matches += 1;
+        } else if i < read_qual.len() {
+            let qual = read_qual[i] as f64;
+            let error_prob = f64::powf(10.0, -qual / 10.0);
+            let penalty = error_prob * qual - 1.0;
+            mismatch_penalty -= penalty.max(0.0);
+        }
+    }
+
+    let raw_score = matches as f64 / len as f64;
+    (raw_score, mismatch_penalty)
+}
+
 /// Quality-aware chunked alignment for long reads.
+/// Scores each chunk against the CORRESPONDING region in text at the EXPECTED position.
 pub fn two_bit_score_chunks_with_quality(
     pattern: &[u8],
     text: &[u8],
@@ -849,12 +874,6 @@ pub fn two_bit_score_chunks_with_quality(
         return (0.0, 0, 0.0);
     }
 
-    if m <= 31 {
-        let (score, _, offset, penalty) = two_bit_align_with_quality(pattern, text, read_qual);
-        return (score, offset, penalty);
-    }
-
-    // Multi-chunk with quality awareness
     let chunk_size = 31;
     let mut total_score = 0.0;
     let mut total_penalty = 0.0f64;
@@ -863,23 +882,25 @@ pub fn two_bit_score_chunks_with_quality(
     for (ci, chunk) in pattern.chunks(chunk_size).enumerate() {
         let chunk_start = ci * chunk_size;
         let chunk_end = (chunk_start + chunk_size).min(m);
-        let _chunk_len = chunk_end - chunk_start;
+        let chunk_len = chunk_end - chunk_start;
 
         let text_start = chunk_start.min(text.len());
-        let text_end = chunk_end.min(text.len());
+        let text_end = (chunk_start + chunk_len).min(text.len());
         let text_region = &text[text_start..text_end];
 
-        if text_region.is_empty() {
+        if text_region.len() < chunk_len {
+            chunks += 1;
             continue;
         }
 
         // Extract quality for this chunk
         let qual_start = chunk_start.min(read_qual.len());
-        let qual_len = (chunk_end).min(read_qual.len()).saturating_sub(qual_start);
-        let chunk_qual = &read_qual[qual_start..qual_start.min(qual_len)];
+        let qual_end = chunk_end.min(read_qual.len());
+        let chunk_qual = &read_qual[qual_start..qual_end];
 
-        let (chunk_score, _, _, penalty) =
-            two_bit_align_with_quality(chunk, text_region, chunk_qual);
+        // Direct comparison at expected position with quality awareness
+        let (chunk_score, penalty) =
+            compute_quality_aware_score_direct(chunk, text_region, chunk_qual);
         total_score += chunk_score;
         total_penalty += penalty;
         chunks += 1;
@@ -1326,15 +1347,85 @@ pub fn smith_waterman_with_quality(
     (final_score, cigar, best_offset, total_quality_penalty)
 }
 
-/// Score a read of any length against a genome region using chunked 2-bit XOR.
-/// Splits the pattern into 31bp chunks, scores each chunk against the
-/// CORRESPONDING region in text, and returns the average score.
+/// A mismatch observation from alignment.
+#[derive(Debug, Clone)]
+pub struct MismatchObservation {
+    /// Position in the read (0-indexed)
+    pub read_pos: usize,
+    /// Position in the genome (0-indexed)
+    pub genome_pos: usize,
+    /// Base from the read (1-indexed: A=1, C=2, G=3, T=4)
+    pub read_base: u8,
+    /// Base from the genome (1-indexed: A=1, C=2, G=3, T=4)
+    pub genome_base: u8,
+}
+
+/// Extract mismatch positions and bases from an alignment.
 ///
-/// For pattern ≤31bp: single XOR operation, instant.
-/// For pattern >31bp: N chunks (N = ceil(len/31)), N XOR operations.
+/// Given the pattern (read), text (genome region at best offset), and alignment offset,
+/// returns a list of mismatch observations with read position, genome position, and bases.
 ///
-/// Returns (score_0_to_1, best_offset).
-pub fn two_bit_score_chunks(pattern: &[u8], text: &[u8]) -> (f64, usize) {
+/// Only returns mismatches from the best-scoring window (not from suboptimal positions).
+pub fn extract_mismatches(pattern: &[u8], text: &[u8], offset: usize) -> Vec<MismatchObservation> {
+    let m = pattern.len();
+    if m == 0 || text.is_empty() || offset >= text.len() {
+        return Vec::new();
+    }
+
+    let text_start = offset.min(text.len());
+    let text_end = (text_start + m).min(text.len());
+    let text_region = &text[text_start..text_end];
+
+    let mut mismatches = Vec::new();
+
+    for i in 0..text_region.len() {
+        if pattern[i] != text_region[i] {
+            mismatches.push(MismatchObservation {
+                read_pos: i,
+                genome_pos: text_start + i,
+                read_base: pattern[i],
+                genome_base: text_region[i],
+            });
+        }
+    }
+
+    mismatches
+}
+
+/// Extract mismatches from XOR result without needing the full text.
+///
+/// This is the fast path: given the XOR result and pattern, we can determine
+/// which positions mismatch without scanning the full text.
+/// Returns (mismatch_positions_in_pattern, read_base, genome_base) tuples.
+pub fn extract_mismatches_from_xor(xor_val: u64, pattern: &[u8]) -> Vec<(usize, u8, u8)> {
+    let m = pattern.len();
+    if m == 0 {
+        return Vec::new();
+    }
+
+    let mut mismatches = Vec::new();
+    let mut val = xor_val;
+
+    for i in 0..m {
+        let pattern_base = pattern[i];
+        let text_base = (val & 3) as u8;
+
+        if text_base != pattern_base {
+            mismatches.push((i, pattern_base, text_base));
+        }
+
+        val >>= 2;
+    }
+
+    mismatches
+}
+
+/// Fast alignment: score pattern against text without sliding window.
+/// Compares pattern directly against text at the expected position.
+/// For use when anchor position is already known (fast mode).
+///
+/// Returns (score_0_to_1, offset_always_0).
+pub fn two_bit_score_direct(pattern: &[u8], text: &[u8]) -> (f64, usize) {
     let m = pattern.len();
     let n = text.len();
 
@@ -1342,13 +1433,7 @@ pub fn two_bit_score_chunks(pattern: &[u8], text: &[u8]) -> (f64, usize) {
         return (0.0, 0);
     }
 
-    if m <= 31 {
-        let (score, _, offset) = two_bit_align(pattern, text);
-        return (score, offset);
-    }
-
-    // Multi-chunk: split pattern into 31bp chunks
-    let chunk_size = 31;
+    let chunk_size = 31usize;
     let mut total_score = 0.0;
     let mut chunks = 0usize;
 
@@ -1357,23 +1442,413 @@ pub fn two_bit_score_chunks(pattern: &[u8], text: &[u8]) -> (f64, usize) {
         let chunk_end = (chunk_start + chunk_size).min(m);
         let chunk_len = chunk_end - chunk_start;
 
-        // Score this chunk against the CORRESPONDING region in text
         let text_start = chunk_start.min(n);
-        let text_end = chunk_end.min(n);
+        let text_end = (chunk_start + chunk_len).min(n);
         let text_region = &text[text_start..text_end];
 
         if text_region.len() < chunk_len {
-            total_score += 0.0;
             chunks += 1;
             continue;
         }
 
-        let (chunk_score, _, _chunk_offset) = two_bit_align(chunk, text_region);
-        total_score += chunk_score;
+        let mut matches = 0usize;
+        for i in 0..chunk_len {
+            if text_region[i] == chunk[i] {
+                matches += 1;
+            }
+        }
+
+        total_score += matches as f64 / chunk_len as f64;
         chunks += 1;
     }
 
     (total_score / chunks as f64, 0)
+}
+
+/// Score a read of any length against a genome region using chunked 2-bit XOR.
+/// Splits the pattern into 31bp chunks, scores each chunk against the
+/// CORRESPONDING region in text at the EXPECTED position (no sliding window).
+///
+/// For pattern ≤31bp: single XOR operation, instant.
+/// For pattern >31bp: N chunks (N = ceil(len/31)), N direct comparisons.
+///
+/// Returns (score_0_to_1, offset_always_0).
+pub fn two_bit_score_chunks(pattern: &[u8], text: &[u8]) -> (f64, usize) {
+    let m = pattern.len();
+    let n = text.len();
+
+    if m == 0 || n == 0 {
+        return (0.0, 0);
+    }
+
+    let chunk_size = 31usize;
+    let mut total_score = 0.0;
+    let mut chunks = 0usize;
+
+    for (ci, chunk) in pattern.chunks(chunk_size).enumerate() {
+        let chunk_start = ci * chunk_size;
+        let chunk_end = (chunk_start + chunk_size).min(m);
+        let chunk_len = chunk_end - chunk_start;
+
+        // Score this chunk against the CORRESPONDING region in text at expected position
+        let text_start = chunk_start.min(n);
+        let text_end = (chunk_start + chunk_len).min(n);
+        let text_region = &text[text_start..text_end];
+
+        if text_region.len() < chunk_len {
+            chunks += 1;
+            continue;
+        }
+
+        // Direct comparison at expected position (no sliding window)
+        let mut matches = 0usize;
+        for i in 0..chunk_len {
+            if text_region[i] == chunk[i] {
+                matches += 1;
+            }
+        }
+
+        total_score += matches as f64 / chunk_len as f64;
+        chunks += 1;
+    }
+
+    (total_score / chunks as f64, 0)
+}
+
+/// Score a sub-region of pattern against the corresponding text region using chunked XOR.
+/// Internal helper for soft-clipping.
+fn score_subregion(pattern: &[u8], text: &[u8]) -> f64 {
+    let m = pattern.len();
+    if m == 0 || text.is_empty() || text.len() < m {
+        return 0.0;
+    }
+
+    let chunk_size = 31usize;
+    let mut total_score = 0.0;
+    let mut chunks = 0usize;
+
+    for (ci, chunk) in pattern.chunks(chunk_size).enumerate() {
+        let chunk_start = ci * chunk_size;
+        let chunk_end = (chunk_start + chunk_size).min(m);
+        let chunk_len = chunk_end - chunk_start;
+
+        let text_start = chunk_start.min(text.len());
+        let text_end = (text_start + chunk_len).min(text.len());
+        let text_region = &text[text_start..text_end];
+
+        if text_region.len() < chunk_len {
+            chunks += 1;
+            continue;
+        }
+
+        let mut matches = 0usize;
+        for i in 0..chunk_len {
+            if text_region[i] == chunk[i] {
+                matches += 1;
+            }
+        }
+
+        total_score += matches as f64 / chunk_len as f64;
+        chunks += 1;
+    }
+
+    if chunks == 0 {
+        0.0
+    } else {
+        total_score / chunks as f64
+    }
+}
+
+/// Soft-clipping via XOR slide.
+///
+/// Slides windows of varying start/end positions across the read, scores each
+/// window against the corresponding text region using chunked XOR, and finds
+/// the best-scoring sub-region. The clipped portions become soft-clips (S:)
+/// in the CIGAR string.
+///
+/// Two-pass strategy for efficiency:
+///   Pass 1: Coarse scan at step size to find best region
+///   Pass 2: Fine-grained refinement around best region
+///
+/// This is O(N * step) instead of O(N²), making it practical for long reads.
+///
+/// # Arguments
+/// * `pattern` — encoded read sequence (2-bit: A=0, C=1, G=2, T=3)
+/// * `text` — encoded reference region
+/// * `min_align_len` — minimum alignment length (shorter windows are skipped)
+/// * `clip_threshold` — score below this triggers clipping (0.0 = always clip, 1.0 = never clip)
+///
+/// # Returns
+/// (score, cigar_with_softclips, text_offset)
+///   - score: alignment score of the best window (0.0-1.0)
+///   - cigar: includes S operations for clipped regions, e.g. "10S50M5S"
+///   - text_offset: best starting position in text
+pub fn two_bit_align_softclip(
+    pattern: &[u8],
+    text: &[u8],
+    min_align_len: usize,
+    clip_threshold: f64,
+) -> (f64, String, usize) {
+    let m = pattern.len();
+    let n = text.len();
+
+    if m == 0 || n == 0 {
+        return (0.0, String::new(), 0);
+    }
+
+    // If read is shorter than min alignment, no clipping possible
+    if m <= min_align_len {
+        let score = score_subregion(pattern, text);
+        return (score, format!("{}M", m), 0);
+    }
+
+    // Step size for coarse scan: adaptive based on read length
+    let step = if m <= 100 {
+        1
+    } else if m <= 500 {
+        5
+    } else {
+        10
+    };
+
+    // Pass 1: Coarse scan — find best start and end positions
+    let mut best_score = 0.0f64;
+    let mut best_start = 0usize;
+    let mut best_end = m;
+
+    for start in (0..=m.saturating_sub(min_align_len)).step_by(step) {
+        for end in ((start + min_align_len)..=m).step_by(step) {
+            let win_len = end - start;
+            let text_region = &text[..text.len().min(win_len)];
+            if text_region.len() < win_len {
+                continue;
+            }
+
+            let score = score_subregion(&pattern[start..end], text_region);
+            if score > best_score {
+                best_score = score;
+                best_start = start;
+                best_end = end;
+            }
+        }
+    }
+
+    // Pass 2: Fine-grained refinement around best region
+    let refine_range = step.max(3);
+    let refine_start = best_start.saturating_sub(refine_range);
+    let refine_end = (best_end + refine_range).min(m);
+
+    for start in refine_start..=refine_end.saturating_sub(min_align_len) {
+        for end in ((start + min_align_len)..=refine_end.min(m)).step_by(1) {
+            let win_len = end - start;
+            let text_region = &text[..text.len().min(win_len)];
+            if text_region.len() < win_len {
+                continue;
+            }
+
+            let score = score_subregion(&pattern[start..end], text_region);
+            if score > best_score {
+                best_score = score;
+                best_start = start;
+                best_end = end;
+            }
+        }
+    }
+
+    // Build CIGAR with soft-clips
+    let aligned_len = best_end - best_start;
+    let left_clip = best_start;
+    let right_clip = m - best_end;
+
+    // Build aligned CIGAR from XOR (match/mismatch detail)
+    let aligned_cigar = if aligned_len <= 31 {
+        // Single chunk: use XOR for detailed M/X CIGAR
+        let mut pat_val: u64 = 0;
+        for &b in &pattern[best_start..best_end] {
+            pat_val = (pat_val << 2) | (b as u64 & 3);
+        }
+        let mut txt_val: u64 = 0;
+        for &b in &text[..aligned_len] {
+            txt_val = (txt_val << 2) | (b as u64 & 3);
+        }
+        let xor = pat_val ^ txt_val;
+        build_cigar_from_xor(xor, aligned_len)
+    } else {
+        format!("{}M", aligned_len)
+    };
+
+    let cigar = if left_clip > 0 && right_clip > 0 {
+        format!("{}S{}{}S", left_clip, aligned_cigar, right_clip)
+    } else if left_clip > 0 {
+        format!("{}S{}", left_clip, aligned_cigar)
+    } else if right_clip > 0 {
+        format!("{}{}S", aligned_cigar, right_clip)
+    } else {
+        aligned_cigar
+    };
+
+    // Only apply clipping if it provides meaningful improvement over full-read alignment
+    let full_score = score_subregion(pattern, &text[..text.len().min(m)]);
+    let should_clip = if clip_threshold <= 0.0 {
+        // No threshold: always use best window
+        best_score > full_score
+    } else if full_score >= clip_threshold {
+        // Full-read score is already good enough — don't clip
+        false
+    } else {
+        // Full-read score is poor; clip only if window is significantly better
+        best_score > full_score * 1.1 && best_score >= clip_threshold
+    };
+
+    if should_clip && (left_clip > 0 || right_clip > 0) {
+        (best_score, cigar, 0)
+    } else {
+        (full_score, format!("{}M", m), 0)
+    }
+}
+
+/// Quality-aware soft-clipping via XOR slide.
+///
+/// Like `two_bit_align_softclip` but uses per-base quality scores to weight
+/// mismatches. Low-quality regions are more likely to be soft-clipped.
+///
+/// # Arguments
+/// * `pattern` — encoded read sequence
+/// * `text` — encoded reference region
+/// * `quality` — per-base quality scores (Phred-scaled, already -33)
+/// * `min_align_len` — minimum alignment length
+/// * `clip_threshold` — score threshold for clipping
+///
+/// # Returns
+/// (score, cigar_with_softclips, text_offset, quality_penalty)
+pub fn two_bit_align_softclip_with_quality(
+    pattern: &[u8],
+    text: &[u8],
+    quality: &[u8],
+    min_align_len: usize,
+    clip_threshold: f64,
+) -> (f64, String, usize, f64) {
+    let m = pattern.len();
+    let n = text.len();
+
+    if m == 0 || n == 0 {
+        return (0.0, String::new(), 0, 0.0);
+    }
+
+    if m <= min_align_len {
+        let (score, _penalty) = compute_quality_aware_score_direct(pattern, text, quality);
+        return (score, format!("{}M", m), 0, _penalty);
+    }
+
+    let step = if m <= 100 {
+        1
+    } else if m <= 500 {
+        5
+    } else {
+        10
+    };
+
+    let mut best_score = 0.0f64;
+    let mut best_start = 0usize;
+    let mut best_end = m;
+    let mut best_penalty = 0.0f64;
+
+    // Coarse scan
+    for start in (0..=m.saturating_sub(min_align_len)).step_by(step) {
+        for end in ((start + min_align_len)..=m).step_by(step) {
+            let win_len = end - start;
+            let text_region = &text[..text.len().min(win_len)];
+            if text_region.len() < win_len {
+                continue;
+            }
+
+            let qual_slice = &quality[start..quality.len().min(end)];
+            let (score, penalty) =
+                compute_quality_aware_score_direct(&pattern[start..end], text_region, qual_slice);
+            let adjusted = (score + penalty).clamp(0.0, 1.0);
+
+            if adjusted > best_score {
+                best_score = adjusted;
+                best_start = start;
+                best_end = end;
+                best_penalty = penalty;
+            }
+        }
+    }
+
+    // Fine refinement
+    let refine_range = step.max(3);
+    let refine_start = best_start.saturating_sub(refine_range);
+    let refine_end = (best_end + refine_range).min(m);
+
+    for start in refine_start..=refine_end.saturating_sub(min_align_len) {
+        for end in ((start + min_align_len)..=refine_end.min(m)).step_by(1) {
+            let win_len = end - start;
+            let text_region = &text[..text.len().min(win_len)];
+            if text_region.len() < win_len {
+                continue;
+            }
+
+            let qual_slice = &quality[start..quality.len().min(end)];
+            let (score, penalty) =
+                compute_quality_aware_score_direct(&pattern[start..end], text_region, qual_slice);
+            let adjusted = (score + penalty).clamp(0.0, 1.0);
+
+            if adjusted > best_score {
+                best_score = adjusted;
+                best_start = start;
+                best_end = end;
+                best_penalty = penalty;
+            }
+        }
+    }
+
+    let aligned_len = best_end - best_start;
+    let left_clip = best_start;
+    let right_clip = m - best_end;
+
+    let aligned_cigar = if aligned_len <= 31 {
+        let mut pat_val: u64 = 0;
+        for &b in &pattern[best_start..best_end] {
+            pat_val = (pat_val << 2) | (b as u64 & 3);
+        }
+        let mut txt_val: u64 = 0;
+        for &b in &text[..aligned_len] {
+            txt_val = (txt_val << 2) | (b as u64 & 3);
+        }
+        let xor = pat_val ^ txt_val;
+        build_cigar_from_xor(xor, aligned_len)
+    } else {
+        format!("{}M", aligned_len)
+    };
+
+    let cigar = if left_clip > 0 && right_clip > 0 {
+        format!("{}S{}{}S", left_clip, aligned_cigar, right_clip)
+    } else if left_clip > 0 {
+        format!("{}S{}", left_clip, aligned_cigar)
+    } else if right_clip > 0 {
+        format!("{}{}S", aligned_cigar, right_clip)
+    } else {
+        aligned_cigar
+    };
+
+    // Only clip if it helps
+    let (full_score, full_penalty) =
+        compute_quality_aware_score_direct(pattern, &text[..text.len().min(m)], quality);
+    let full_adjusted = (full_score + full_penalty).clamp(0.0, 1.0);
+    let should_clip = if clip_threshold <= 0.0 {
+        best_score > full_adjusted
+    } else if full_adjusted >= clip_threshold {
+        false
+    } else {
+        best_score > full_adjusted * 1.1 && best_score >= clip_threshold
+    };
+
+    if should_clip && (left_clip > 0 || right_clip > 0) {
+        (best_score, cigar, 0, best_penalty)
+    } else {
+        (full_adjusted, format!("{}M", m), 0, full_penalty)
+    }
 }
 
 #[cfg(test)]
@@ -1653,7 +2128,7 @@ mod tests {
         );
         // Offset should be near where ACGT is (position 8), allow some tolerance
         assert!(
-            offset >= 6 && offset <= 10,
+            (6..=10).contains(&offset),
             "Expected offset near 8, got {}",
             offset
         );
@@ -2135,5 +2610,128 @@ mod tests {
         let (score2, _cigar2) = smith_waterman_internal(&p2, &t2, 2, -1, -2);
         // Local alignment finds ACG match (score=6), T vs A worse than stopping
         assert_eq!(score2, 6);
+    }
+
+    // === Soft-clipping Tests ===
+
+    #[test]
+    fn test_softclip_no_clip_perfect_match() {
+        let p = encode_seq("ACGTACGTACGT");
+        let t = encode_seq("ACGTACGTACGT");
+        let (score, cigar, _offset) = two_bit_align_softclip(&p, &t, 4, 0.9);
+        assert_eq!(score, 1.0);
+        assert!(cigar.contains('M'));
+        assert!(!cigar.contains('S'));
+    }
+
+    #[test]
+    fn test_softclip_left_adapter() {
+        // Read: [garbage][real_match]
+        let p = encode_seq("TTTTTTTTTTACGTACGTACGT");
+        let t = encode_seq("ACGTACGTACGT");
+        let (score, cigar, _offset) = two_bit_align_softclip(&p, &t, 4, 0.5);
+        assert!(score > 0.7);
+        assert!(cigar.contains('S'), "Expected soft-clip, got: {}", cigar);
+        assert!(cigar.contains('M'));
+    }
+
+    #[test]
+    fn test_softclip_right_adapter() {
+        // Read: [real_match][garbage]
+        let p = encode_seq("ACGTACGTACGTTTTTTTTTTT");
+        let t = encode_seq("ACGTACGTACGT");
+        let (score, cigar, _offset) = two_bit_align_softclip(&p, &t, 4, 0.5);
+        assert!(score > 0.7);
+        assert!(cigar.contains('S'), "Expected soft-clip, got: {}", cigar);
+        assert!(cigar.contains('M'));
+    }
+
+    #[test]
+    fn test_softclip_both_ends() {
+        // Read: [garbage][real_match][garbage]
+        let p = encode_seq("TTTTTTTTTTACGTACGTACGTTTTTTTTTTT");
+        let t = encode_seq("ACGTACGTACGT");
+        let (score, cigar, _offset) = two_bit_align_softclip(&p, &t, 4, 0.5);
+        assert!(score > 0.7);
+        // Should have S on both sides
+        let s_count = cigar.matches('S').count();
+        assert!(
+            s_count >= 1,
+            "Expected at least one soft-clip, got: {}",
+            cigar
+        );
+    }
+
+    #[test]
+    fn test_softclip_min_align_len_respected() {
+        let p = encode_seq("TTTTTTTTTTACGT");
+        let t = encode_seq("ACGT");
+        let (score, cigar, _offset) = two_bit_align_softclip(&p, &t, 4, 0.5);
+        assert!(score > 0.0);
+        assert!(cigar.contains('M'));
+    }
+
+    #[test]
+    fn test_softclip_threshold_no_clip_when_not_better() {
+        // Full read scores well — clipping shouldn't hurt
+        let p = encode_seq("ACGTACGTACGTACGT");
+        let t = encode_seq("ACGTACGTACGTACGT");
+        let (score, cigar, _offset) = two_bit_align_softclip(&p, &t, 4, 0.95);
+        assert_eq!(score, 1.0);
+        assert!(!cigar.contains('S'));
+    }
+
+    #[test]
+    fn test_softclip_quality_aware() {
+        // High quality in middle, low quality at ends
+        let p = encode_seq("TTTTTTTTTTACGTACGTACGTTTTTTTTTTT");
+        let t = encode_seq("ACGTACGTACGT");
+        let mut qual: Vec<u8> = vec![5; 29]; // low quality everywhere
+        qual[10..23].iter_mut().for_each(|q| *q = 30); // high quality in middle
+        let (score, cigar, _, penalty) = two_bit_align_softclip_with_quality(&p, &t, &qual, 4, 0.5);
+        assert!(score > 0.5);
+        assert!(
+            cigar.contains('S'),
+            "Expected soft-clip with quality, got: {}",
+            cigar
+        );
+        assert!(penalty <= 0.0);
+    }
+
+    #[test]
+    fn test_softclip_empty_input() {
+        let p: Vec<u8> = vec![];
+        let t = encode_seq("ACGT");
+        let (score, cigar, _offset) = two_bit_align_softclip(&p, &t, 1, 0.5);
+        assert_eq!(score, 0.0);
+        assert!(cigar.is_empty());
+    }
+
+    #[test]
+    fn test_softclip_shorter_than_min() {
+        let p = encode_seq("AC");
+        let t = encode_seq("AC");
+        let (score, cigar, _offset) = two_bit_align_softclip(&p, &t, 10, 0.5);
+        assert!(score > 0.0);
+        assert!(!cigar.contains('S'));
+    }
+
+    #[test]
+    fn test_softclip_long_read_adapter_pattern() {
+        // Simulate Illumina read: adapter at start, real sequence, noise at end
+        let mut p = vec![3u8; 50]; // TTT... (adapter-like)
+        for i in 0..100 {
+            p.push([0, 1, 2, 3][i % 4]); // real pattern
+        }
+        p.extend(vec![3u8; 30]); // TTT... (noise)
+        let t: Vec<u8> = (0..100).map(|i| [0, 1, 2, 3][i % 4]).collect();
+        let (score, cigar, _offset) = two_bit_align_softclip(&p, &t, 10, 0.5);
+        assert!(score > 0.7);
+        assert!(
+            cigar.contains('S'),
+            "Expected soft-clip for long read with adapters, got: {}",
+            cigar
+        );
+        assert!(cigar.contains('M'));
     }
 }

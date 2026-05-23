@@ -47,6 +47,7 @@ simulated_*_5pct.fastq
 simulated_*_10pct.fastq
 simulated_*.fastq
 SRR*.fastq
+srr*/
 
 # Benchmark output / large data files
 *.bitpop
@@ -72,3 +73,11 @@ paper.md
 multi-index.md
 prompt.md
 plan-addon.md
+mastervsnew.md
+sam.md
+readme_missing_flags.md
+process.md
+pac.md
+pacbio_results.md
+chunk.md
+test.md

@@ -261,7 +261,7 @@ mod tests {
         bp.build();
 
         let bytes = serialize_bitpop(&bp).unwrap();
-        assert!(bytes.len() > 0);
+        assert!(!bytes.is_empty());
 
         let loaded = deserialize_bitpop(&bytes).unwrap();
         assert_eq!(loaded.genome_count(), 1);
