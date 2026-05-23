@@ -9,6 +9,8 @@
 
 **Quick benchmark** (3 genomes, 19.7 Mb): **99.3% mapping rate**, **99.9% classification accuracy**, **0.9s per 10k reads**.
 
+**PacBio HiFi benchmark** (69 genomes, 285 Mb, 86k long reads): **95.2% accuracy**, **99% mapping rate**, **8 min** (realistic error profile: homopolymers, chimera, coverage variation).
+
 **CAMI benchmark** (61 genomes, 157 Mb):
 - **Best accuracy**: k14+k13 consensus, **89.85% accuracy**, 79.3% mapping rate
 - **Best coverage**: k10 two-pass tn=4 (--second-pass-score 0.4), **85.20% accuracy**, 96.6% mapping rate
@@ -1023,6 +1025,40 @@ Two-pass mapping recovers reads that fail the initial 0.7 threshold by re-mappin
 The evo_* genomes are >99.9% identical strains from the same sample assembly. They share most k-mers with each other, causing reads to map to the wrong strain. This is a **fundamental limitation** of k-mer-based classification for near-identical genomes, not a bug. SNP-aware weighting or ML would be required for strain-level resolution.
 
 **See**: [docs/paper.pdf](docs/paper.pdf) for detailed analysis.
+
+### PacBio HiFi Benchmark (69 Genomes, 86k Reads)
+
+**Setup**: 69 bacterial genomes (51+ species, 285 Mb). 86,248 simulated PacBio HiFi reads (8-20 kb, realistic error profile: 0.1% base errors, 2% homopolymer errors, 1% chimeras, variable coverage ±50%). k=70, 16 threads.
+
+#### Accuracy vs k-mer Size
+
+| k | Accuracy | Mapping Rate | Map Time |
+|---|----------|-------------|----------|
+| 10 | 42.6% | 99.97% | - |
+| 13 | 73.7% | 99.97% | - |
+| 15 | 75.1% | 99.97% | - |
+| 20 | 79.7% | 99.97% | - |
+| 25 | 82.7% | 99.97% | 7.5 min |
+| 30 | 82.9% | 99.97% | 7.9 min |
+| 40 | 83.0% | 99.97% | 8.0 min |
+| 70 | 83.1% | 99.97% | 7.7 min |
+| **70 (no chunk)** | **95.7%** | **99.93%** | **6.9 min** |
+
+#### Realistic vs Simple Error Profile
+
+| Dataset | k | Accuracy | Mapping Rate |
+|---------|---|----------|-------------|
+| Simple (0.1% errors) | 70 | 95.7% | 99.93% |
+| **Realistic (homopolymers, chimera, coverage)** | **70** | **95.2%** | **99.0%** |
+
+**Key findings:**
+- Accuracy plateaus at k≥40 for chunked mapping
+- **No-chunk mode** (full read alignment) gives **+12.6% accuracy** over chunked mode
+- Realistic error profile (homopolymers, chimera, coverage variation) causes only **-0.5% accuracy drop**
+- 8 minutes to map 86k long reads on 16 threads
+- ~100% mapping rate across all k values
+
+**See**: [simulate_realistic.py](simulate_realistic.py) for read simulation script.
 
 ## Project Structure
 
