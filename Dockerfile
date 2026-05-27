@@ -16,8 +16,10 @@ RUN apt-get update && \
         libz-dev && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy manifest first for better layer caching
+# Copy manifest + bench/test structure for better layer caching
 COPY Cargo.toml Cargo.lock* ./
+COPY benches ./benches
+COPY tests ./tests
 
 # Create dummy src to cache dependencies
 RUN mkdir src && \
@@ -27,8 +29,6 @@ RUN mkdir src && \
 
 # Copy actual source code
 COPY src ./src
-COPY benches ./benches
-COPY tests ./tests
 
 # Build release binary
 RUN cargo build --release && \
