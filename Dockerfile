@@ -4,7 +4,7 @@
 # ============================================
 # Stage 1: Build
 # ============================================
-FROM rust:1.84-slim AS builder
+FROM rust:1.87-slim AS builder
 
 WORKDIR /usr/src/bit-pop
 
