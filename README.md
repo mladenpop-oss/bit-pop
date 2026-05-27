@@ -1,6 +1,7 @@
 # Bit-Pop: Multi-Genome DNA Read Classification
 
 [![CI](https://github.com/mladenpop-oss/bit-pop/actions/workflows/ci.yml/badge.svg)](https://github.com/mladenpop-oss/bit-pop/actions/workflows/ci.yml)
+[![Docker](https://github.com/mladenpop-oss/bit-pop/actions/workflows/docker.yml/badge.svg)](https://github.com/mladenpop-oss/bit-pop/pkgs/container/bit-pop)
 [![Tests](https://img.shields.io/badge/tests-312%2B%20unit%2C%205%20integration-blue)](https://github.com/mladenpop-oss/bit-pop)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20043593.svg)](https://doi.org/10.5281/zenodo.20043593)
@@ -146,6 +147,21 @@ brew install bit-pop
 
 ```bash
 cargo install bit-pop
+```
+
+### Docker
+
+```bash
+# Pull from GitHub Container Registry
+docker pull ghcr.io/mladenpop-oss/bit-pop:latest
+
+# Run with mounted data
+docker run --rm -v $(pwd)/data:/home/bitpop/data ghcr.io/mladenpop-oss/bit-pop:latest \
+  run /home/bitpop/data/genomes/Ecoli_K12_MG1655.fna \
+      /home/bitpop/data/reads/simulated_ecoli_10k_new.fastq
+
+# Or use the interactive shell
+docker run --rm -it ghcr.io/mladenpop-oss/bit-pop:latest /bin/bash
 ```
 
 ### Pre-built Binaries
