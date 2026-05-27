@@ -1,0 +1,46 @@
+# Build artifacts
+target/
+**/*.rs.bk
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test data (large, not needed in image build context)
+data/genomes/*.fna
+data/genomes/*.fasta
+data/reads/*.fastq
+
+# Scripts (Python, not needed for Rust build)
+*.py
+scripts/
+
+# Documentation
+docs/
+*.md
+!README.md
+
+# Docker
+Dockerfile
+.dockerignore
+
+# Misc
+procitaj.txt
+paper*.md
+paper*.txt
+paper*.docx
+cami_weighted_report.txt
+check_accuracy.py
+download_*.py
+simulate_*.py
+
+# Git
+.git/
+.gitignore
