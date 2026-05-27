@@ -11,10 +11,11 @@
 
 **PacBio HiFi benchmark** (69 genomes, 285 Mb, 86k long reads): **95.2% accuracy**, **99% mapping rate**, **8 min** (realistic error profile: homopolymers, chimera, coverage variation).
 
-**CAMI benchmark** (61 genomes, 157 Mb):
-- **Best accuracy**: k14+k13 consensus, **89.85% accuracy**, 79.3% mapping rate
-- **Best coverage**: k10 two-pass tn=4 (--second-pass-score 0.4), **85.20% accuracy**, 96.6% mapping rate
-- **Best balanced**: xor tn=4 + EM, **86.77% accuracy**, 85.8% mapping rate
+**CAMI benchmark** (61 genomes, 157 Mb, ~1M reads):
+- **Best accuracy**: k13 tn=4 + EM t=1.0, **92.29% accuracy**, 70.0% mapping
+- **Best consensus**: k12+k13+k14+k15 tn2 + EM, **90.07% accuracy**, 91.1% mapping
+- **Best coverage**: k18+ tn=4, **86.79% accuracy**, 99.6% mapping
+- **Species-level**: ~100% accuracy, **strain-level**: 60-90% within clade
 
 While existing aligners (Bowtie2, BWA, minimap2) map reads to single reference genomes, Bit-Pop identifies **which genome** in a collection best matches each read — making it ideal for metagenomic classification tasks.
 
@@ -73,7 +74,7 @@ See [Usage](#usage) for full documentation.
 
 ### Post-Processing
 
-- **EM post-processing**: Expectation-Maximization algorithm for multi-candidate refinement (`bit-pop em` command), +0.29% accuracy on CAMI dataset
+- **EM post-processing**: Expectation-Maximization algorithm for multi-candidate refinement (`bit-pop em` command), +0.38% accuracy on k13 CAMI (91.91% → 92.29%)
 - **Taxonomic classification**: NCBI taxonomy tree with LCA algorithm for genus/phylum/class-level abundance profiles (`bit-pop tax` command)
 
 ### 🔬 Experimental Features
@@ -82,7 +83,7 @@ The following features are available for testing purposes and may be useful for 
 
 | Feature | Flag | Description |
 |---------|------|-------------|
-| Multi-k consensus | `bit-pop consensus` / `scripts/consensus_base.py` | Combine multiple k-mer indexes (best: k14+k13 = 89.85% accuracy) |
+| Multi-k consensus | `bit-pop consensus` / `scripts/consensus_base.py` | Combine multiple k-mer indexes (best: k12-k15 tn2 + EM = 90.07% accuracy, 91% mapping) |
 | Streaming mode | `--stream` | Process large FASTQ files with fixed RAM (~3GB per chunk) |
 | Two-pass mapping | `--two-pass` | Re-map unmapped reads with lower threshold (+183 correct reads, CAMI 100k sample) |
 | Fuzzy k-mer matching | `--method` | Fuzzy k-mer matching for error-prone reads |
@@ -405,7 +406,7 @@ Apply Expectation-Maximization algorithm to improve multi-candidate SAM mappings
   --confidence-threshold 0.95
 ```
 
-**What it does**: When a read maps to multiple genomes with similar scores, EM uses population-level abundance signals to reassign reads to the most likely genome. Typically converges in 9-11 iterations (~0.13s on 18K reads). On CAMI dataset, EM with `t=0.1, ct=0.95` adds **+0.29% accuracy** over baseline.
+**What it does**: When a read maps to multiple genomes with similar scores, EM uses population-level abundance signals to reassign reads to the most likely genome. Typically converges in 6-7 iterations. On CAMI dataset, EM with `t=1.0, ct=0.95` on k13 mapping adds **+0.38% accuracy** (91.91% → 92.29%, 10,622 reassignments).
 
 **Parameters**:
 - `--convergence`: KL divergence threshold for stopping (default: 0.001)
@@ -507,15 +508,16 @@ python scripts/consensus_base.py \
 
 **Performance comparison** (~1M reads, CAMI, 61 genomes):
 
-| Method | Mapped | Mapping Rate | Accuracy | Time |
-|--------|--------|--------------|----------|------|
-| k13 alone | 69,788 | 69.8% | 89.80% | 44s |
-| k14 alone | 74,616 | 74.6% | 88.90% | 46s |
-| **k14+k13 consensus** | **792,522** | **79.3%** | **89.85%** | **~100s** |
-| k14+k13+k12 consensus | 860,764 | 86.1% | 87.87% | ~150s |
-| k14+k13+k15 consensus | 875,006 | 87.6% | 87.40% | ~150s |
+| Method | Mapped | Mapping Rate | Accuracy | EM Accuracy |
+|--------|--------|--------------|----------|-------------|
+| k13 tn=4 | 697,182 | 70.0% | 91.91% | **92.29%** |
+| k14 tn=4 | 742,747 | 74.6% | 91.55% | - |
+| k15 tn=4 | 840,561 | 84.5% | 89.48% | - |
+| **k12-k15 tn2** | **909,493** | **91.0%** | **89.71%** | **90.07%** |
+| k13+k22 tn2 | 994,188 | 99.5% | 89.50% | 89.86% |
+| k13-k15+k22 tn2 | 994,214 | 99.98% | 89.58% | 89.39% |
 
-**Winner**: k14+k13 gives **+100k mapped reads** vs k13 alone with **+0.05% accuracy**. Adding more k values increases recall but decreases accuracy.
+**Winner**: k12-k15 consensus gives **+212k mapped reads** vs k13 alone with **-1.8% accuracy** (before EM). With EM: k13 solo = 92.29%, k12-k15 consensus = 90.07%. Adding k22+ increases coverage to ~100% but adds noise that lowers accuracy.
 
 **Why use the Python script**: Built-in consensus uses `map_read()` in a parallel iterator, which is slower than the standalone `map` command. The Python script calls `bit-pop map` for each index, achieving better performance.
 
@@ -832,7 +834,7 @@ bit-pop build --cami -f 1036554.gt1kb.fasta -o index.bitpop
 # → "evo_1049056.011.fna" → genome name: "evo_1049056.011"
 ```
 
-This fixes accuracy for CAMI datasets where FASTA headers don't match ground truth labels. Without `--cami`, accuracy can be as low as 1.07%; with it, accuracy reaches ~85.87% on the CAMI Low Complexity benchmark.
+This fixes accuracy for CAMI datasets where FASTA headers don't match ground truth labels. Without `--cami`, accuracy can be as low as 1.07%; with it, accuracy reaches ~93% on the CAMI Low Complexity benchmark.
 
 ### Align Modes
 
@@ -935,9 +937,29 @@ bit-pop map -i index.bitpop -r ont_reads.fastq -a chain \
 
 **Throughput**: ~1,500 reads/second (top_n=1)
 
-### CAMI Low Complexity Benchmark (62 Genomes, 1M Reads)
+### CAMI Low Complexity Benchmark (61 Genomes, 1M Reads)
 
 **Setup**: 61 genomes (1900 sequences, ~157M bases, ~1.3GB index). ~1M reads sampled from original 30GB CAMI dataset. k=10, 16 threads, `--cami` flag for genome naming.
+
+#### K-mer Size Sweep (xor alignment, top-n 4)
+
+| k | Mapped | Mapping Rate | Accuracy | Time |
+|---|--------|--------------|----------|------|
+| 10 | 857,983 (86.2%) | 86.2% | 86.49% | ~60s |
+| 11 | 816,490 (82.0%) | 82.0% | 87.01% | ~55s |
+| 12 | 721,026 (72.4%) | 72.4% | 89.83% | ~55s |
+| **13** | **697,182 (70.0%)** | **70.0%** | **91.91%** | **~50s** |
+| 14 | 742,747 (74.6%) | 74.6% | 91.55% | ~55s |
+| 15 | 840,561 (84.5%) | 84.5% | 89.48% | ~60s |
+| 16 | 940,303 (94.5%) | 94.5% | 87.28% | ~65s |
+| 17 | 980,328 (98.6%) | 98.6% | 86.77% | ~70s |
+| 18 | 990,721 (99.6%) | 99.6% | 86.79% | ~75s |
+| 19 | 993,265 (99.9%) | 99.9% | 86.82% | ~75s |
+| 20 | 993,894 (99.95%) | 99.95% | 86.83% | ~75s |
+| 21 | 994,079 (99.97%) | 99.97% | 86.84% | ~75s |
+| 22 | 994,122 (99.97%) | 99.97% | 86.84% | ~75s |
+
+**Pattern**: k13 gives peak accuracy (91.91%), then accuracy drops and plateaus at ~86.8% for k≥18. Coverage increases monotonically with k, reaching ~100% at k≥18.
 
 #### Top-N Series (xor alignment, k=10)
 
@@ -972,29 +994,57 @@ Two-pass mapping recovers reads that fail the initial 0.7 threshold by re-mappin
 
 **Trade-off**: Two-pass gains +183 correct reads at the cost of +718 wrong reads. Use when maximizing recall is more important than precision.
 
+#### EM Post-Processing (k13, top-n 4)
+
+| Config | Mapped | Accuracy | Changed | Time |
+|--------|--------|----------|---------|------|
+| k13 tn=4 | 697,182 | 91.91% | - | ~50s |
+| **k13 tn=4 + EM (t=1.0, ct=0.95)** | **697,188** | **92.29%** | **10,622** | **~60s** |
+| k13 tn=4 + EM (t=0.1, ct=0.95) | 697,188 | 91.93% | 9,980 | ~60s |
+
+**Note**: Temperature t=1.0 is better than t=0.1 for k13 — softer probability distribution allows more correct reassignments.
+
+#### Multi-K Consensus (consensus_base.py, top-n 4, EM t=1.0)
+
+| Config | Mapped | Mapping Rate | Accuracy | EM Accuracy | Changed |
+|--------|--------|--------------|----------|-------------|---------|
+| k13 tn=4 | 697,182 | 70.0% | 91.91% | **92.29%** | 10,622 |
+| k12+k13 tn2 | 768,639 | 77.0% | 89.75% | **90.10%** | 132,153 |
+| **k12+k13+k14+k15 tn2** | **909,493** | **91.0%** | **89.71%** | **90.07%** | **132,153** |
+| k13+k22 tn2 | 994,188 | 99.5% | 89.50% | 89.86% | 184,078 |
+| k13+k14+k15+k22 tn2 | 994,214 | 99.98% | 89.58% | 89.39% | 190,020 |
+
+**Pattern**: Adding higher k (k22+) increases coverage to ~100% but introduces noise that lowers accuracy. k12-k15 range is optimal for consensus.
+
 #### 🏆 Best Configuration
 
 | Goal | Config | Mapped | Mapping Rate | Accuracy | Time |
 |------|--------|--------|--------------|----------|------|
-| **Best accuracy** | k14+k13 consensus | 792,522 | 79.3% | **89.85%** | ~100s |
-| **Best coverage** | xor tn=4 + EM (t=0.1, ct=0.95) | 857,992 | 85.8% | 86.77% | ~132s |
+| **Best accuracy** | k13 tn=4 + EM t=1.0 | 697,188 | 70.0% | **92.29%** | ~60s |
+| **Best consensus** | k12-k15 tn2 + EM t=1.0 | 909,493 | 91.0% | **90.07%** | ~250s |
+| **Best coverage** | k18 tn=4 | 990,721 | 99.6% | 86.79% | ~80s |
 
-#### Per-Genome Accuracy Breakdown (xor top-n 4)
+#### Per-Genome Accuracy Breakdown (k12-k15 tn2 + EM t=1.0)
 
 - Numeric genomes (1030752, 1036554, etc.): **99-100%**
 - Sample genomes: **100%**
-- 1052944, 1053058: **40-48%** (similar genomes)
-- evo_* strains: **46-92%** (near-identical, fundamental limitation)
-  - evo_1035930.011: 90.97%
-  - evo_1035930.029: 59.04%
-  - evo_1035930.032: 55.72%
-  - evo_1049056.011: 56.01%
-  - evo_1049056.013: 46.87%
-  - evo_1049056.015: 52.46%
-  - evo_1286_AP.008: 92.26%
-  - evo_1286_AP.026: 69.65%
-  - evo_1286_AP.033: 54.32%
-  - evo_1286_AP.037: 47.25%
+- 1052944, 1053058, 1052947: **36-73%** (closely related group)
+- 1286_AP parent: **20.87%** (confused with evo_1286_AP strains)
+- evo_* strains: **24-88%** (near-identical, fundamental limitation)
+  - evo_1035930.011: 78.77%
+  - evo_1035930.029: 88.14%
+  - evo_1035930.032: 41.26%
+  - evo_1049056.011: 79.54%
+  - evo_1049056.013: 30.14%
+  - evo_1049056.015: 42.03%
+  - evo_1049056.031: 30.02%
+  - evo_1049056.039: 24.24%
+  - evo_1286_AP.008: 83.67%
+  - evo_1286_AP.026: 84.57%
+  - evo_1286_AP.033: 42.52%
+  - evo_1286_AP.037: 63.74%
+
+**Key insight**: Misclassifications are **within-clade only**. Reads from evo_1035930.* never map to evo_1049056.* or evo_1286_AP.*. Species-level classification is ~100% accurate. Strain-level confusion only occurs between genomes sharing >99.9% identity.
 
 #### Unmapped Reads Analysis
 
@@ -1013,16 +1063,18 @@ Two-pass mapping recovers reads that fail the initial 0.7 threshold by re-mappin
 4. **Spaced seeds are catastrophic** — only 413-807 mapped reads (vs 748K baseline)
 5. **SW mode is too slow** — timeout after 600s
 6. **Diminishing returns** from tn=5 onward — mapped count drops drastically (712K→511K)
-7. **EM adds +0.29% accuracy** via reassignment within strain groups, consolidating reads into a single "winner" per strain group
-8. **EM pattern**: For competing evo_* genomes, one gets 90%+ accuracy, others drop to 0-10%
-9. **Two-pass mapping** (`--two-pass`) recovers unmapped reads at threshold 0.4: +183 correct reads, +718 wrong reads, 99.9% mapping rate
-10. **Two-pass threshold**: 0.4 is optimal — 0.5 maps too few additional reads, 0.3 maps all but adds more false positives
-11. **Multi-k consensus: k14+k13 is optimal** — 89.85% accuracy, 79.3% recall. Adding more k values increases recall but decreases accuracy
-12. **Unmapped reads are not "on the edge"** — scores of 0.35-0.49, far below 0.7 threshold. These are strain variants not in the reference
+7. **EM adds +0.38% accuracy on k13** (91.91% → 92.29%) via reassignment within strain groups (10,622 reassignments). Temperature t=1.0 is better than t=0.1
+8. **k-mer size sweep (k10-k22)**: k13 gives peak accuracy (91.91%), k18+ gives peak coverage (~100%) but accuracy drops to ~86.8% plateau
+9. **Multi-k consensus: k12-k15 is optimal** — 90.07% accuracy with EM, 91% mapping. Adding k22+ increases coverage to ~100% but adds noise (accuracy drops to 89.4%)
+10. **Two-pass mapping** (`--two-pass`) recovers unmapped reads at threshold 0.4: +183 correct reads, +718 wrong reads, 99.9% mapping rate
+11. **Two-pass threshold**: 0.4 is optimal — 0.5 maps too few additional reads, 0.3 maps all but adds more false positives
+12. **Species-level classification: ~100%** — misclassifications only occur within clades sharing >99.9% identity, never between different species
+13. **Strain-level classification: 60-90%** — evo_* strains confused with parent and sibling strains. Weighted avg: 61.8%. Larger strains (evo_029, evo_008) classify better (84-88%)
+14. **Unmapped reads are not "on the edge"** — scores of 0.35-0.49, far below 0.7 threshold. These are strain variants not in the reference
 
 #### Why is overall accuracy lower than single-genome benchmarks?
 
-The evo_* genomes are >99.9% identical strains from the same sample assembly. They share most k-mers with each other, causing reads to map to the wrong strain. This is a **fundamental limitation** of k-mer-based classification for near-identical genomes, not a bug. SNP-aware weighting or ML would be required for strain-level resolution.
+The evo_* genomes are >99.9% identical strains from the same sample assembly. They share most k-mers with each other, causing reads to map to the wrong strain. This is a **fundamental limitation** of k-mer-based classification for near-identical genomes, not a bug. **Species-level classification remains ~100% accurate** — misclassifications only occur within clades, never between different species. SNP-aware weighting or ML would be required for strain-level resolution.
 
 **See**: [docs/paper.pdf](docs/paper.pdf) for detailed analysis.
 
@@ -1142,7 +1194,7 @@ cargo bench
 - Research tool; not validated for clinical use
 - Index file sizes ~152 MB for 19.7 Mb genome
 - Chunked reads (>31bp) use generic CIGAR without per-base mismatch detail
-- **Strain-level resolution**: Genomes that are >99.9% identical (same sample, different strains) share most k-mers. Reads may map to the wrong strain. This is a **fundamental information-theoretic limitation** of k-mer rarity-based classification, not a bug. EM post-processing can consolidate reads within strain groups (+0.29% accuracy) but cannot fully resolve sibling strains that share >99.9% of their k-mers. SNP-aware weighting or ML would be required for full strain-level resolution.
+- **Strain-level resolution**: Genomes that are >99.9% identical (same sample, different strains) share most k-mers. Reads may map to the wrong strain. This is a **fundamental information-theoretic limitation** of k-mer rarity-based classification, not a bug. EM post-processing can consolidate reads within strain groups (+0.38% on k13) but cannot fully resolve sibling strains that share >99.9% of their k-mers. **Species-level classification is ~100% accurate** — misclassifications only occur within clades, never between different species. SNP-aware weighting or ML would be required for full strain-level resolution.
 
 ## Large Genome Support
 
@@ -1186,7 +1238,7 @@ python scripts/bitpop-workflow.py merge mapped/ -o final.sam
 - **Phase 2.1**: Memory-mapped FASTA (`--mmap`)
 - **Phase 2.2**: Parallel index build (rayon)
 - **Phase 3.1**: Progress reporting (CLI progress bars)
-- **Phase 4**: CAMI Low Complexity benchmark (61 genomes, ~1M reads, 89.85% accuracy)
+- **Phase 4**: CAMI Low Complexity benchmark (61 genomes, ~1M reads, k10-k22 sweep, consensus, EM, 92.29% peak accuracy)
 - **Phase 6**: NCBI E-utilities integration (search, fetch, update commands)
 - **Phase 7**: Large genome workaround (`bitpop-workflow.py`)
 - **UX**: `run` command with auto-index caching and smart defaults

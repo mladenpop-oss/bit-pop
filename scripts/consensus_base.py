@@ -8,6 +8,7 @@ import sys
 import os
 import tempfile
 import argparse
+import re
 from collections import defaultdict
 
 def parse_fastq(fastq_path):
@@ -24,6 +25,15 @@ def parse_fastq(fastq_path):
             name = header[1:]  # remove @
             sequences[name] = seq
     return sequences
+
+def extract_tags(line):
+    """Extract SAM optional tags from a line (handles both tab-separated and concatenated tags)."""
+    tags = {}
+    # Match numeric tags (f=float, i=int) - stop at next tag or whitespace
+    for match in re.finditer(r'(AS|RK|KK|XS|NM|HF|MD):(f|i):([0-9.]+)', line):
+        tag_name, tag_type, tag_value = match.groups()
+        tags[tag_name] = (tag_type, tag_value)
+    return tags
 
 def parse_sam(sam_path):
     """Parse SAM file and return dict: read_name -> list of (genome_name, genome_id, score, cigar, pos, is_reverse, rarity)"""
@@ -42,20 +52,22 @@ def parse_sam(sam_path):
                 continue
             pos = int(fields[3]) - 1  # 1-based to 0-based
             cigar = fields[5]
-            
+
             score = 0.0
             rarity = 0.0
             genome_id = 0
             is_reverse = bool(flag & 0x10)
-            
-            for tag in fields[11:]:
-                if tag.startswith('AS:f:'):
-                    score = float(tag[5:])
-                elif tag.startswith('RK:f:'):
-                    rarity = float(tag[5:])
-                elif tag.startswith('KK:i:'):
-                    genome_id = int(tag[5:])
-            
+
+            # Extract tags from remaining fields (handles concatenated tags)
+            rest = '\t'.join(fields[11:])
+            tags = extract_tags(rest)
+            if 'AS' in tags:
+                score = float(tags['AS'][1])
+            if 'RK' in tags:
+                rarity = float(tags['RK'][1])
+            if 'KK' in tags:
+                genome_id = int(tags['KK'][1])
+
             results[read_name].append({
                 'genome_name': genome_name,
                 'genome_id': genome_id,
@@ -126,6 +138,8 @@ def main():
     parser.add_argument('--min-k', type=int, default=1, help='Min k-values that must map')
     parser.add_argument('--context-window', type=int, default=50, help='Context window')
     parser.add_argument('--bit-pop', default=None, help='Path to bit-pop executable (auto: target/release/bit-pop.exe)')
+    parser.add_argument('--consensus-top-n', type=int, default=1,
+                        help='Top-N consensus candidates per read (1=final vote only, >1=for EM)')
     args = parser.parse_args()
     
     # Auto-detect bit-pop path
@@ -220,20 +234,24 @@ def main():
             else:
                 voted = vote_majority(filtered)
             
-            # Write best result
+            # Write top-N results
             if voted:
-                best_name, best_data = voted[0]
-                best_r = best_data['best']
+                top_n = voted[:args.consensus_top_n]
+                for rank, (gname, gdata) in enumerate(top_n):
+                    best_r = gdata['best']
+
+                    flag = 0x10 if best_r['is_reverse'] else 0
+                    # MAPQ from score: scale to 0-60 (same as bit-pop uses)
+                    mapq = min(60, max(0, int(gdata['score'] * 60)))
+                    
+                    # Tags
+                    as_tag = f"\tAS:f:{gdata['score']:.4f}"
+                    xs_tag = f"\tXS:Z:{best_r['rarity']:.4f}"
+                    kk_tag = f"\tKK:i:{gdata['count']}"
+                    rk_tag = f"\tRK:i:{rank}"
+                    
+                    out.write(f"{read_name}\t{flag}\t{gname}\t{best_r['pos']+1}\t{mapq}\t{best_r['cigar']}\t*\t0\t0\t{seq}\t*{as_tag}{xs_tag}{kk_tag}{rk_tag}\n")
                 
-                flag = 0x10 if best_r['is_reverse'] else 0
-                mapq = 0
-                
-                # Tags
-                as_tag = f"\tAS:f:{best_r['score']:.4f}"
-                xs_tag = f"\tXS:Z:{best_r['rarity']:.4f}"
-                kk_tag = f"\tKK:i:{best_data['count']}"
-                
-                out.write(f"{read_name}\t{flag}\t{best_name}\t{best_r['pos']+1}\t{mapq}\t{best_r['cigar']}\t*\t0\t0\t{seq}\t*{as_tag}{xs_tag}{kk_tag}\n")
                 mapped += 1
         
         print(f"  Mapped: {mapped} / {total} reads")

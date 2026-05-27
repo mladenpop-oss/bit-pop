@@ -1665,13 +1665,6 @@ impl BitPop {
         let encoded = encode_sequence(read);
         let mut results = Vec::new();
 
-        let rarity = if encoded.len() >= self.k {
-            let occ = fm.count_occurrences(&encoded[..self.k]);
-            1.0 / (occ as f64).max(1.0)
-        } else {
-            1.0
-        };
-
         let read_hf = if self.enable_hf {
             Some(hf::HfProfile::compute_read(&encoded, self.hf_min_run))
         } else {
@@ -1682,6 +1675,34 @@ impl BitPop {
             if align_score < min_final_score {
                 continue;
             }
+
+            // Per-candidate rarity: extract k-mer from genome at candidate position
+            let rarity = if encoded.len() >= self.k {
+                if let Some(genome_seq) = self.genomes.get(&genome_id) {
+                    let start = (position as usize).min(genome_seq.len().saturating_sub(1));
+                    let end = (start + self.k).min(genome_seq.len());
+                    if end - start == self.k {
+                        let kmer_bytes = &genome_seq[start..end];
+                        let kmer_encoded = kmer_bytes
+                            .iter()
+                            .map(|&b| b as char)
+                            .filter_map(encode_base)
+                            .collect::<Vec<u8>>();
+                        if kmer_encoded.len() == self.k {
+                            let occ = fm.count_occurrences(&kmer_encoded);
+                            1.0 / (occ as f64).max(1.0)
+                        } else {
+                            1.0
+                        }
+                    } else {
+                        1.0
+                    }
+                } else {
+                    1.0
+                }
+            } else {
+                1.0
+            };
 
             let mut hf_score = 0.0f64;
             if self.enable_hf {
@@ -1694,7 +1715,7 @@ impl BitPop {
 
             // align_score is the primary signal (0.85 weight).
             // rarity provides a modest boost (0.15 weight) so perfect matches
-            // floor at 0.85 instead of 0.5 when the first k-mer is common.
+            // floor at 0.85 instead of 0.5 when the anchor k-mer is common.
             let combined_score = align_score * 0.85 + rarity * 0.15;
             let context =
                 self.extract_genome_context(genome_id, position, read_len, context_window);
@@ -1748,8 +1769,28 @@ impl BitPop {
             }
 
             let rarity = if encoded.len() >= self.k {
-                let occ = fm.count_occurrences(&encoded[..self.k]);
-                1.0 / (occ as f64).max(1.0)
+                if let Some(genome_seq) = self.genomes.get(&genome_id) {
+                    let start = (position as usize).min(genome_seq.len().saturating_sub(1));
+                    let end = (start + self.k).min(genome_seq.len());
+                    if end - start == self.k {
+                        let kmer_bytes = &genome_seq[start..end];
+                        let kmer_encoded = kmer_bytes
+                            .iter()
+                            .map(|&b| b as char)
+                            .filter_map(encode_base)
+                            .collect::<Vec<u8>>();
+                        if kmer_encoded.len() == self.k {
+                            let occ = fm.count_occurrences(&kmer_encoded);
+                            1.0 / (occ as f64).max(1.0)
+                        } else {
+                            1.0
+                        }
+                    } else {
+                        1.0
+                    }
+                } else {
+                    1.0
+                }
             } else {
                 1.0
             };
@@ -3049,8 +3090,28 @@ impl BitPop {
             }
 
             let rarity = if encoded.len() >= self.k {
-                let occ = fm.count_occurrences(&encoded[..self.k]);
-                1.0 / (occ as f64).max(1.0)
+                if let Some(genome_seq) = self.genomes.get(&genome_id) {
+                    let start = (position as usize).min(genome_seq.len().saturating_sub(1));
+                    let end = (start + self.k).min(genome_seq.len());
+                    if end - start == self.k {
+                        let kmer_bytes = &genome_seq[start..end];
+                        let kmer_encoded = kmer_bytes
+                            .iter()
+                            .map(|&b| b as char)
+                            .filter_map(encode_base)
+                            .collect::<Vec<u8>>();
+                        if kmer_encoded.len() == self.k {
+                            let occ = fm.count_occurrences(&kmer_encoded);
+                            1.0 / (occ as f64).max(1.0)
+                        } else {
+                            1.0
+                        }
+                    } else {
+                        1.0
+                    }
+                } else {
+                    1.0
+                }
             } else {
                 1.0
             };
@@ -3493,8 +3554,28 @@ impl BitPop {
             }
 
             let rarity = if encoded.len() >= self.k {
-                let occ = fm.count_occurrences(&encoded[..self.k]);
-                1.0 / (occ as f64).max(1.0)
+                if let Some(genome_seq) = self.genomes.get(&genome_id) {
+                    let start = (position as usize).min(genome_seq.len().saturating_sub(1));
+                    let end = (start + self.k).min(genome_seq.len());
+                    if end - start == self.k {
+                        let kmer_bytes = &genome_seq[start..end];
+                        let kmer_encoded = kmer_bytes
+                            .iter()
+                            .map(|&b| b as char)
+                            .filter_map(encode_base)
+                            .collect::<Vec<u8>>();
+                        if kmer_encoded.len() == self.k {
+                            let occ = fm.count_occurrences(&kmer_encoded);
+                            1.0 / (occ as f64).max(1.0)
+                        } else {
+                            1.0
+                        }
+                    } else {
+                        1.0
+                    }
+                } else {
+                    1.0
+                }
             } else {
                 1.0
             };
@@ -3565,8 +3646,28 @@ impl BitPop {
             }
 
             let rarity = if encoded.len() >= self.k {
-                let occ = fm.count_occurrences(&encoded[..self.k]);
-                1.0 / (occ as f64).max(1.0)
+                if let Some(genome_seq) = self.genomes.get(&genome_id) {
+                    let start = (position as usize).min(genome_seq.len().saturating_sub(1));
+                    let end = (start + self.k).min(genome_seq.len());
+                    if end - start == self.k {
+                        let kmer_bytes = &genome_seq[start..end];
+                        let kmer_encoded = kmer_bytes
+                            .iter()
+                            .map(|&b| b as char)
+                            .filter_map(encode_base)
+                            .collect::<Vec<u8>>();
+                        if kmer_encoded.len() == self.k {
+                            let occ = fm.count_occurrences(&kmer_encoded);
+                            1.0 / (occ as f64).max(1.0)
+                        } else {
+                            1.0
+                        }
+                    } else {
+                        1.0
+                    }
+                } else {
+                    1.0
+                }
             } else {
                 1.0
             };
@@ -4811,12 +4912,6 @@ impl BitPop {
         };
 
         let encoded = encode_sequence(read);
-        let rarity = if encoded.len() >= self.k {
-            let occ = fm.count_occurrences(&encoded[..self.k]);
-            1.0 / (occ as f64).max(1.0)
-        } else {
-            1.0
-        };
 
         let full_results = self.map_read(read, context_window);
 
@@ -4842,6 +4937,35 @@ impl BitPop {
                     }
                 } else {
                     align_score
+                };
+
+                // Per-genome rarity: extract k-mer from genome at candidate position
+                let rarity = if encoded.len() >= self.k {
+                    let pos = full_results.first().map(|r| r.position).unwrap_or(0);
+                    if let Some(genome_seq) = self.genomes.get(genome_id) {
+                        let start = (pos as usize).min(genome_seq.len().saturating_sub(1));
+                        let end = (start + self.k).min(genome_seq.len());
+                        if end - start == self.k {
+                            let kmer_bytes = &genome_seq[start..end];
+                            let kmer_encoded = kmer_bytes
+                                .iter()
+                                .map(|&b| b as char)
+                                .filter_map(encode_base)
+                                .collect::<Vec<u8>>();
+                            if kmer_encoded.len() == self.k {
+                                let occ = fm.count_occurrences(&kmer_encoded);
+                                1.0 / (occ as f64).max(1.0)
+                            } else {
+                                1.0
+                            }
+                        } else {
+                            1.0
+                        }
+                    } else {
+                        1.0
+                    }
+                } else {
+                    1.0
                 };
 
                 MappingResult {
