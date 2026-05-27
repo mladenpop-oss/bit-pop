@@ -16,19 +16,8 @@ RUN apt-get update && \
         libz-dev && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy manifest + bench/test structure for better layer caching
-COPY Cargo.toml Cargo.lock* ./
-COPY benches ./benches
-COPY tests ./tests
-
-# Create dummy src to cache dependencies
-RUN mkdir src && \
-    echo "fn main() {}" > src/main.rs && \
-    cargo build --release && \
-    rm -rf src
-
-# Copy actual source code
-COPY src ./src
+# Copy all source code
+COPY . .
 
 # Build release binary
 RUN cargo build --release && \
@@ -56,9 +45,6 @@ RUN apt-get update && \
 
 # Copy binary from builder
 COPY --from=builder /usr/local/bin/bit-pop /usr/local/bin/bit-pop
-
-# Copy example data for testing
-COPY data ./data
 
 # Set working directory and permissions
 WORKDIR /home/bitpop
