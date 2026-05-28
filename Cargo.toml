@@ -30,6 +30,10 @@ mmap = []
 [dev-dependencies]
 criterion = "0.5"
 
+[[bin]]
+name = "bit-pop"
+path = "src/main.rs"
+
 [[bench]]
 name = "benchmark"
 harness = false
