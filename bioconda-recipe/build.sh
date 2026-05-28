@@ -1,12 +1,12 @@
 #!/bin/bash
+# Bit-Pop Bioconda build script
+# Extracts pre-built binary from GitHub Release and installs to conda prefix
 
-if [ "$(uname)" == "Darwin" ]; then
-  # macOS - use the macOS binary
-  tar xzf bit-pop-x86_64-macos.tar.gz 2>/dev/null || \
-  tar xzf bit-pop-aarch64-macos.tar.gz
-  install -m 755 bit-pop $PREFIX/bin/bit-pop
-else
-  # Linux
-  tar xzf bit-pop-x86_64-linux.tar.gz
-  install -m 755 bit-pop $PREFIX/bin/bit-pop
-fi
+set -ex
+
+# Extract the binary (already downloaded from source/url)
+tar xzf *.tar.gz
+
+# Install to conda bin directory
+install -d $PREFIX/bin
+install -m 755 bit-pop $PREFIX/bin/bit-pop

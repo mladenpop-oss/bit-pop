@@ -1,5 +1,7 @@
+# See https://bioconda.github.io/recipes.html for guidelines
 {% set name = "bit-pop" %}
 {% set version = "0.2.0" %}
+{% set build_number = 0 %}
 
 package:
   name: "{{ name|lower }}"
@@ -9,16 +11,29 @@ source:
   url: "https://github.com/mladenpop-oss/bit-pop/releases/download/v{{ version }}/bit-pop-x86_64-linux.tar.gz"
   sha256: "d9fe77d533287f5e001182c2125fa4e28f6267f2df562fd5fc60a5b0f1f0c400"
 
+build:
+  number: {{ build_number }}
+  script: $BASH_PATH build.sh
+
+requirements:
+  run:
+    - openssl >=3.0
+    - zlib
+
+test:
+  commands:
+    - bit-pop --help
+    - test -x $PREFIX/bin/bit-pop
+
 about:
   home: "https://github.com/mladenpop-oss/bit-pop"
   license: "MIT"
-  license_file: LICENSE
   summary: "Ultra-fast multi-genome DNA read classification"
-  doc_url: "https://github.com/mladenpop-oss/bit-pop"
-
-dependencies:
-  - openssl
-  - zlib
+  description: |
+    Bit-Pop maps DNA reads across dozens of genomes using a compact FM-index
+    built in Rust with bit-level parallelism. Ideal for metagenomic classification.
+  doc_url: "https://github.com/mladenpop-oss/bit-pop#readme"
+  dev_url: "https://github.com/mladenpop-oss/bit-pop"
 
 extra:
   recipe-maintainers:
