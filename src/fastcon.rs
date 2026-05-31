@@ -1,4 +1,3 @@
-use crate::report_atomic_progress;
 use crate::BitPop;
 use std::collections::HashMap;
 use std::fs::File;
@@ -362,14 +361,12 @@ impl FastCon {
                 Some(r) => r,
                 None => {
                     pb.inc(1);
-                    report_atomic_progress(pb.position(), total_unique as u64);
                     continue;
                 }
             };
 
             if k_results.len() < self.min_k_mappings {
                 pb.inc(1);
-                report_atomic_progress(pb.position(), total_unique as u64);
                 continue;
             }
 
@@ -385,7 +382,6 @@ impl FastCon {
 
             if filtered.is_empty() {
                 pb.inc(1);
-                report_atomic_progress(pb.position(), total_unique as u64);
                 continue;
             }
 
@@ -407,7 +403,6 @@ impl FastCon {
             mapped_reads += 1;
 
             pb.inc(1);
-            report_atomic_progress(pb.position(), total_unique as u64);
         }
 
         pb.finish();
