@@ -98,6 +98,7 @@ pub mod consensus;
 pub mod delta;
 pub mod em;
 pub mod fasta;
+pub mod fastcon;
 pub mod fastq;
 pub mod fm;
 pub mod hf;
@@ -112,6 +113,7 @@ pub mod taxonomy;
 
 pub use chunk_consensus::MultiChunkConsensus;
 pub use consensus::{ConsensusResult, ConsensusStrategy, KResult, MultiKConsensus};
+pub use fastcon::FastCon;
 
 use std::fmt;
 
@@ -5218,6 +5220,16 @@ fn compute_tlen(
             }
         }
         _ => 0,
+    }
+}
+
+/// Print simple atomic progress line when BITPOP_PROGRESS=atomic env var is set.
+/// Call this alongside existing progress bar updates to show progress in GUI.
+pub fn report_atomic_progress(current: u64, total: u64) {
+    if std::env::var("BITPOP_PROGRESS").as_deref().ok() == Some("atomic") {
+        let pct = (current as f64 / total as f64) * 100.0;
+        eprintln!("\r  Progress: {}/{} ({:.1}%)", current, total, pct);
+        let _ = std::io::Write::flush(&mut std::io::stderr());
     }
 }
 

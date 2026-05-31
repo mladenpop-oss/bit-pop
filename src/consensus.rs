@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Write};
+use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 
 use rayon::prelude::*;
 
 use crate::fastq::ReadsFormat;
+use crate::report_atomic_progress;
 use crate::BitPop;
 
 /// Consensus voting strategy for multi-k mapping.
@@ -65,16 +66,17 @@ pub struct MultiKConsensus {
 }
 
 impl MultiKConsensus {
-    pub fn from_paths(index_paths: &[(PathBuf, usize)], min_score: f64) -> Result<Self, String> {
+    pub fn from_paths(index_paths: &[PathBuf], min_score: f64) -> Result<Self, String> {
         let mut indexes = HashMap::new();
         let mut k_values = Vec::new();
 
-        for (path, k) in index_paths {
-            println!("  Loading k={} index: {}", k, path.display());
+        for path in index_paths {
             let bp = BitPop::deserialize_from_file(path.to_str().unwrap())
                 .map_err(|e| format!("Failed to load index {}: {}", path.display(), e))?;
-            indexes.insert(*k, bp);
-            k_values.push(*k);
+            let k = bp.k();
+            println!("  Loading k={} index: {}", k, path.display());
+            indexes.insert(k, bp);
+            k_values.push(k);
         }
 
         k_values.sort();
@@ -334,6 +336,7 @@ impl MultiKConsensus {
                     }
                 }
                 pb.inc(1);
+                report_atomic_progress(pb.position(), total as u64);
             }
         } else {
             for (name, seq, _qual) in &reads_vec {
@@ -345,6 +348,7 @@ impl MultiKConsensus {
                     }
                 }
                 pb.inc(1);
+                report_atomic_progress(pb.position(), total as u64);
             }
         }
 
@@ -437,6 +441,7 @@ impl MultiKConsensus {
                         }
                     }
                     pb.inc(1);
+                    report_atomic_progress(pb.position(), total as u64);
                 }
             } else {
                 for (name, seq, _qual) in chunk {
@@ -448,6 +453,7 @@ impl MultiKConsensus {
                         }
                     }
                     pb.inc(1);
+                    report_atomic_progress(pb.position(), total as u64);
                 }
             }
 
@@ -607,6 +613,7 @@ impl MultiKConsensus {
                 .enumerate()
                 .filter_map(|(idx, (_name, seq, _qual))| {
                     pb.inc(1);
+                    report_atomic_progress(pb.position(), total as u64);
                     let results = bp.map_read(seq, self.context_window);
                     if let Some(best) = results.first() {
                         let genome_name = bp.genome_name(best.genome_id).unwrap_or("?").to_string();
@@ -678,6 +685,7 @@ impl MultiKConsensus {
             // Apply min_k_mappings filter
             if k_results.len() < self.min_k_mappings {
                 pb.inc(1);
+                report_atomic_progress(pb.position(), total as u64);
                 continue;
             }
 
@@ -694,6 +702,7 @@ impl MultiKConsensus {
 
             if filtered.is_empty() {
                 pb.inc(1);
+                report_atomic_progress(pb.position(), total as u64);
                 continue;
             }
 
@@ -730,262 +739,7 @@ impl MultiKConsensus {
             }
 
             pb.inc(1);
-        }
-
-        pb.finish();
-        writer
-            .flush()
-            .map_err(|e| format!("Failed to flush output: {}", e))?;
-
-        Ok((mapped, total))
-    }
-
-    /// Base consensus: uses EXACT same mapping as standalone `map` command.
-    /// For each k, calls map_reads_parallel_with_progress → temp SAM file.
-    /// Then parses temp SAMs and combines using consensus voting.
-    pub fn map_reads_to_sam_base(
-        &self,
-        reads_path: &std::path::Path,
-        output_path: &std::path::Path,
-        _threads: usize,
-    ) -> Result<(usize, usize), String> {
-        use std::io::BufRead;
-
-        let reads = ReadsFormat::Fastq(
-            crate::fastq::parse_fastq(reads_path.to_str().unwrap())
-                .map_err(|e| format!("Failed to parse reads: {}", e))?,
-        );
-
-        let total = reads.count();
-        println!("  Loaded {} reads", total);
-
-        let reads_vec: Vec<(&str, &str)> = match &reads {
-            ReadsFormat::Fastq(r) => r.iter().map(|(n, s, _)| (n.as_str(), s.as_str())).collect(),
-            ReadsFormat::Fasta(r) => r.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect(),
-        };
-
-        // Phase 1: Map each k using EXACT same function as `map` command → temp SAM
-        println!(
-            "\n[1/{}] Mapping each k (using `map` engine)...",
-            self.k_values.len() + 1
-        );
-
-        let temp_dir = std::env::temp_dir();
-        let mut temp_sams: Vec<(usize, String)> = Vec::new();
-
-        for &k in &self.k_values {
-            let bp = self.indexes.get(&k).unwrap();
-            let temp_sam = temp_dir.join(format!("consensus_k{}.sam", k));
-            let temp_sam_str = temp_sam.to_str().unwrap();
-
-            println!("  k={}: mapping → {}", k, temp_sam_str);
-            let pb = indicatif::ProgressBar::new(total as u64);
-            pb.set_style(
-                indicatif::ProgressStyle::default_bar()
-                    .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} k={k}")
-                    .unwrap()
-                    .progress_chars("#>-"),
-            );
-
-            let pb_clone = pb.clone();
-            let result = bp.map_reads_parallel_with_progress(
-                &reads_vec,
-                temp_sam_str,
-                self.context_window,
-                if total > 1000 { 100 } else { 10 },
-                move |completed, _total| {
-                    pb_clone.set_position(completed as u64);
-                },
-            );
-
-            pb.set_position(total as u64);
-            let mapped = result.unwrap_or(0);
-            pb.finish_with_message(format!("  k={}: {} reads mapped", k, mapped));
-            temp_sams.push((k, temp_sam.to_string_lossy().to_string()));
-        }
-
-        // Phase 2: Parse temp SAMs and combine
-        println!(
-            "\n[2/{}] Combining results with {}...",
-            self.k_values.len() + 1,
-            match self.strategy {
-                ConsensusStrategy::Majority => "majority",
-                ConsensusStrategy::WeightedScore => "weighted_score",
-                ConsensusStrategy::BestScore => "best_score",
-            }
-        );
-
-        // Build genome_name → genome_id map from first index
-        let mut name_to_id: HashMap<String, u32> = HashMap::new();
-        if let Some(first_bp) = self.indexes.values().next() {
-            let names = first_bp.genome_names_ordered();
-            for (gid, name) in names.iter().enumerate() {
-                name_to_id.insert(name.clone(), gid as u32);
-            }
-        }
-
-        // Parse each temp SAM: read_name → Vec<KResult>
-        // SAM fields: [0]QNAME [1]FLAG [2]RNAME [3]POS [4]MAPQ [5]CIGAR [6]RNEXT [7]PNEXT [8]TLEN [9]SEQ [10]QUAL [11+]TAGS
-        let mut read_results: HashMap<String, Vec<KResult>> = HashMap::new();
-
-        for (k, sam_path) in &temp_sams {
-            let file = File::open(sam_path)
-                .map_err(|e| format!("Failed to open temp SAM {}: {}", sam_path, e))?;
-            let reader = BufReader::new(file);
-
-            for line in reader.lines() {
-                let line = line.map_err(|e| format!("Failed to read SAM: {}", e))?;
-                if line.starts_with('@') {
-                    continue;
-                }
-                let fields: Vec<&str> = line.split('\t').collect();
-                if fields.len() < 11 {
-                    continue;
-                }
-                let read_name = fields[0].to_string();
-                let genome_name = fields[2].to_string();
-                if genome_name == "*" {
-                    continue; // unmapped
-                }
-                let pos: u64 = fields[3].parse().unwrap_or(1) - 1; // 1-based to 0-based
-                let cigar = fields[5].to_string();
-
-                let mut score = 0.0;
-                let mut rarity = 0.0;
-                let mut is_reverse = false;
-
-                let flag: i32 = fields[1].parse().unwrap_or(0);
-                if flag & 0x10 != 0 {
-                    is_reverse = true;
-                }
-
-                for f in &fields[11..] {
-                    if let Some(val) = f.strip_prefix("AS:f:") {
-                        score = val.parse().unwrap_or(0.0);
-                    } else if let Some(val) = f.strip_prefix("XS:Z:") {
-                        rarity = val.parse().unwrap_or(0.0);
-                    }
-                }
-
-                let genome_id = *name_to_id.get(&genome_name).unwrap_or(&0);
-
-                read_results.entry(read_name).or_default().push(KResult {
-                    k: *k,
-                    genome_id,
-                    genome_name,
-                    score,
-                    rarity,
-                    cigar,
-                    position: pos,
-                    is_reverse,
-                });
-            }
-        }
-
-        // Clean up temp files
-        for (_, sam_path) in &temp_sams {
-            let _ = std::fs::remove_file(sam_path);
-        }
-
-        // Collect genomes from first index for SAM header
-        let mut all_genomes: Vec<(String, u64)> = Vec::new();
-        if let Some(first_bp) = self.indexes.values().next() {
-            let names = first_bp.genome_names_ordered();
-            for (gid, name) in names.iter().enumerate() {
-                let len = first_bp.genome_seq_len(gid as u32).unwrap_or(0) as u64;
-                all_genomes.push((name.clone(), len));
-            }
-        }
-
-        // Build reads lookup
-        let reads_named: Vec<(String, String)> = match &reads {
-            ReadsFormat::Fastq(r) => r.iter().map(|(n, s, _)| (n.clone(), s.clone())).collect(),
-            ReadsFormat::Fasta(r) => r.iter().map(|(n, s)| (n.clone(), s.clone())).collect(),
-        };
-
-        // Write SAM output
-        let file = File::create(output_path)
-            .map_err(|e| format!("Failed to create output file: {}", e))?;
-        let mut writer = BufWriter::new(file);
-
-        writeln!(writer, "@HD\tVN:1.6\tSO:unsorted")
-            .map_err(|e| format!("Failed to write header: {}", e))?;
-        for (name, len) in &all_genomes {
-            writeln!(writer, "@SQ\tSN:{}\tLN:{}", name, len)
-                .map_err(|e| format!("Failed to write SQ line: {}", e))?;
-        }
-
-        let pb = indicatif::ProgressBar::new(total as u64);
-        pb.set_style(
-            indicatif::ProgressStyle::default_bar()
-                .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} combining")
-                .unwrap()
-                .progress_chars("#>-"),
-        );
-
-        let mut mapped = 0usize;
-
-        for (name, seq) in &reads_named {
-            let k_results = match read_results.get(name) {
-                Some(r) => r,
-                None => {
-                    pb.inc(1);
-                    continue;
-                }
-            };
-
-            if k_results.len() < self.min_k_mappings {
-                pb.inc(1);
-                continue;
-            }
-
-            let filtered: Vec<_> = if self.min_score > 0.0 {
-                k_results
-                    .iter()
-                    .filter(|r| r.score >= self.min_score)
-                    .cloned()
-                    .collect()
-            } else {
-                k_results.clone()
-            };
-
-            if filtered.is_empty() {
-                pb.inc(1);
-                continue;
-            }
-
-            let candidates = match self.strategy {
-                ConsensusStrategy::BestScore => {
-                    let best_idx = filtered
-                        .iter()
-                        .enumerate()
-                        .max_by(|a, b| a.1.score.partial_cmp(&b.1.score).unwrap())
-                        .map(|(i, _)| i);
-                    if let Some(bi) = best_idx {
-                        let kr = &filtered[bi];
-                        vec![ConsensusResult {
-                            genome_id: kr.genome_id,
-                            genome_name: kr.genome_name.clone(),
-                            vote_count: 1,
-                            k_count: filtered.len(),
-                            consensus_score: kr.score,
-                            k_results: vec![kr.clone()],
-                        }]
-                    } else {
-                        Vec::new()
-                    }
-                }
-                ConsensusStrategy::Majority => self.vote_majority_multi(&filtered),
-                ConsensusStrategy::WeightedScore => self.vote_weighted_multi(&filtered),
-            };
-
-            let limit = if self.top_n > 1 { self.top_n } else { 1 };
-            for (i, cr) in candidates.iter().take(limit).enumerate() {
-                self.write_consensus_sam_line(&mut writer, name, seq, cr, i == 0)?;
-                mapped += 1;
-            }
-
-            pb.inc(1);
+            report_atomic_progress(pb.position(), total as u64);
         }
 
         pb.finish();

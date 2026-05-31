@@ -5,6 +5,7 @@ use std::io::{BufWriter, Write};
 use rayon::prelude::*;
 
 use crate::fastq::ReadsFormat;
+use crate::report_atomic_progress;
 use crate::BitPop;
 
 /// Per-config mapping result for a single read.
@@ -340,6 +341,7 @@ impl MultiChunkConsensus {
                     }
                 }
                 pb.inc(1);
+                report_atomic_progress(pb.position(), total as u64);
             }
         } else {
             for (name, seq, _qual) in &reads_vec {
@@ -351,6 +353,7 @@ impl MultiChunkConsensus {
                     }
                 }
                 pb.inc(1);
+                report_atomic_progress(pb.position(), total as u64);
             }
         }
 
@@ -444,6 +447,7 @@ impl MultiChunkConsensus {
                         }
                     }
                     pb.inc(1);
+                    report_atomic_progress(pb.position(), total as u64);
                 }
             } else {
                 for (name, seq, _qual) in chunk {
@@ -455,6 +459,7 @@ impl MultiChunkConsensus {
                         }
                     }
                     pb.inc(1);
+                    report_atomic_progress(pb.position(), total as u64);
                 }
             }
 

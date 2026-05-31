@@ -1,3 +1,4 @@
+use bit_pop::report_atomic_progress;
 use bit_pop::MappingResult;
 use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -9,6 +10,7 @@ use std::time::Instant;
 use bit_pop::cache::CacheManager;
 use bit_pop::chunk_consensus::MultiChunkConsensus;
 use bit_pop::consensus::MultiKConsensus;
+use bit_pop::fastcon::FastCon;
 use bit_pop::fastq::{parse_reads, ReadsFormat};
 use bit_pop::ncbi::{NcbiClient, NcbiConfig};
 use bit_pop::{AlignMode, BitPop, FuzzyMethod};
@@ -69,6 +71,9 @@ enum Commands {
 
     /// Multi-k consensus: map reads against multiple k-indexes with voting
     Consensus(ConsensusArgs),
+
+    /// Fast consensus: run `bit-pop map` for each index, then combine (like Python script)
+    FastCon(FastConArgs),
 
     /// Multi chunk-% consensus: same index, different chunk sizes, voting
     ChunkConsensus(ChunkConsensusArgs),
@@ -604,7 +609,7 @@ struct EmArgs {
 
 #[derive(clap::Args)]
 struct ConsensusArgs {
-    /// List of index:k pairs (comma-separated), e.g. "index_k10.bitpop:10,index_k20.bitpop:20,index_k50.bitpop:50"
+    /// List of index files (comma-separated), e.g. "index_k10.bitpop index_k20.bitpop index_k50.bitpop"
     #[arg(short, long, required = true, num_args = 1..)]
     indexes: Vec<String>,
 
@@ -679,10 +684,49 @@ struct ConsensusArgs {
     /// Two-pass mode: map each k separately (faster, like Python script)
     #[arg(long)]
     two_pass: bool,
+}
 
-    /// Base mode: use same parallel mapping as standalone `map` command
+#[derive(clap::Args)]
+struct FastConArgs {
+    /// List of index files, e.g. "index_k10.bitpop index_k20.bitpop"
+    #[arg(short, long, required = true, num_args = 1..)]
+    indexes: Vec<String>,
+
+    /// Reads file (FASTQ)
+    #[arg(short, long, required = true)]
+    reads: PathBuf,
+
+    /// Output SAM file
+    #[arg(short, long, required = true)]
+    output: PathBuf,
+
+    /// Strategy: weighted_score (default), majority, best_score
+    #[arg(long, default_value = "weighted_score")]
+    strategy: String,
+
+    /// Minimum alignment score threshold (0.0-1.0, 0 = no filter)
+    #[arg(long, default_value = "0.0")]
+    min_score: f64,
+
+    /// Minimum k-values that must find a mapping (default: 1)
+    #[arg(long, default_value = "1")]
+    min_k_mappings: usize,
+
+    /// Number of threads per map
+    #[arg(short = 't', long, default_value = "1")]
+    threads: usize,
+
+    /// Top-N rarest k-mer anchors per map (default: 1)
+    #[arg(long, default_value = "1")]
+    top_n: usize,
+
+    /// Top-N consensus candidates per read (default: 1, >1 for EM)
+    #[arg(long, default_value = "1")]
+    consensus_top_n: usize,
+
+    /// Path to bit-pop executable (auto-detected)
     #[arg(long)]
-    base: bool,
+    bit_pop: Option<PathBuf>,
 }
 
 #[derive(clap::Args)]
@@ -807,6 +851,10 @@ async fn main() {
             cmd_consensus(&args);
             Ok(())
         }
+        Commands::FastCon(args) => {
+            cmd_fastcon(&args);
+            Ok(())
+        }
         Commands::ChunkConsensus(args) => {
             cmd_chunk_consensus(&args);
             Ok(())
@@ -923,6 +971,7 @@ fn cmd_build(args: &BuildArgs, verbose: bool) {
             .unwrap(),
     );
 
+    let mut loaded = 0;
     for fasta_path in &fasta_paths {
         let path_str = fasta_path.to_string_lossy().to_string();
         pb.set_message(format!("Loading: {}", path_str));
@@ -1002,7 +1051,9 @@ fn cmd_build(args: &BuildArgs, verbose: bool) {
                 }
             }
         }
+        loaded += 1;
         pb.inc(1);
+        report_atomic_progress(loaded, fasta_paths.len() as u64);
     }
     pb.finish_with_message("Genomes loaded");
 
@@ -1209,6 +1260,7 @@ fn cmd_map_stream(bp: &BitPop, config: &StreamMapConfig) -> usize {
                 }
                 processed += 1;
                 pb.set_position(processed);
+                report_atomic_progress(processed, total as u64);
             }
         }
 
@@ -1616,6 +1668,7 @@ fn cmd_map(args: &MapArgs, verbose: bool) {
                         if (i + 1) % 10 == 0 || i + 1 == total {
                             pb.set_position((i + 1) as u64);
                             pb.set_message(format!("{}/{} reads", i + 1, total));
+                            report_atomic_progress((i + 1) as u64, total as u64);
                         }
                         (name.clone(), seq.clone(), results)
                     })
@@ -1662,6 +1715,7 @@ fn cmd_map(args: &MapArgs, verbose: bool) {
                             move |completed, total| {
                                 pb_clone.set_position(completed as u64);
                                 pb_clone.set_message(format!("{}/{} reads", completed, total));
+                                report_atomic_progress(completed as u64, total as u64);
                             },
                         )
                         .unwrap_or(0);
@@ -1685,6 +1739,7 @@ fn cmd_map(args: &MapArgs, verbose: bool) {
                             move |completed, total| {
                                 pb_clone.set_position(completed as u64);
                                 pb_clone.set_message(format!("{}/{} reads", completed, total));
+                                report_atomic_progress(completed as u64, total as u64);
                             },
                         )
                         .unwrap_or(0);
@@ -1717,6 +1772,7 @@ fn cmd_map(args: &MapArgs, verbose: bool) {
                 move |completed, total| {
                     pb_clone.set_position(completed as u64);
                     pb_clone.set_message(format!("{}/{} reads", completed, total));
+                    report_atomic_progress(completed as u64, total as u64);
                 },
             )
             .unwrap_or(0)
@@ -1729,6 +1785,7 @@ fn cmd_map(args: &MapArgs, verbose: bool) {
                 move |completed, total| {
                     pb_clone.set_position(completed as u64);
                     pb_clone.set_message(format!("{}/{} reads", completed, total));
+                    report_atomic_progress(completed as u64, total as u64);
                 },
             )
             .unwrap_or(0)
@@ -1759,6 +1816,7 @@ fn cmd_map(args: &MapArgs, verbose: bool) {
                 move |completed, total| {
                     pb_clone.set_position(completed as u64);
                     pb_clone.set_message(format!("{}/{} reads", completed, total));
+                    report_atomic_progress(completed as u64, total as u64);
                 },
             )
             .unwrap_or(0)
@@ -1772,6 +1830,7 @@ fn cmd_map(args: &MapArgs, verbose: bool) {
                 move |completed, total| {
                     pb_clone.set_position(completed as u64);
                     pb_clone.set_message(format!("{}/{} reads", completed, total));
+                    report_atomic_progress(completed as u64, total as u64);
                 },
             )
             .unwrap_or(0)
@@ -1953,6 +2012,7 @@ fn cmd_map_paired(
 
         pb.set_position(total_pairs as u64);
         pb.set_message(format!("{} pairs", total_pairs));
+        report_atomic_progress(total_pairs as u64, total_pairs as u64);
         pb.finish_with_message("Mapping complete");
         result
     } else {
@@ -1962,6 +2022,7 @@ fn cmd_map_paired(
 
         pb.set_position(total_pairs as u64);
         pb.set_message(format!("{} pairs", total_pairs));
+        report_atomic_progress(total_pairs as u64, total_pairs as u64);
         pb.finish_with_message("Mapping complete");
         result
     };
@@ -2866,6 +2927,7 @@ async fn cmd_run(args: &RunArgs) -> Result<(), String> {
 
             pb.set_position(total_pairs as u64);
             pb.set_message(format!("{} pairs", total_pairs));
+            report_atomic_progress(total_pairs as u64, total_pairs as u64);
             pb.finish_with_message("Mapping complete");
             result
         } else {
@@ -2882,6 +2944,7 @@ async fn cmd_run(args: &RunArgs) -> Result<(), String> {
 
             pb.set_position(total_pairs as u64);
             pb.set_message(format!("{} pairs", total_pairs));
+            report_atomic_progress(total_pairs as u64, total_pairs as u64);
             pb.finish_with_message("Mapping complete");
             result
         };
@@ -3024,6 +3087,7 @@ async fn cmd_run(args: &RunArgs) -> Result<(), String> {
                         move |completed, total| {
                             pb_clone.set_position(completed as u64);
                             pb_clone.set_message(format!("{}/{} reads", completed, total));
+                            report_atomic_progress(completed as u64, total as u64);
                         },
                     )
                     .map_err(|e| format!("Mapping failed: {}", e))?;
@@ -3047,6 +3111,7 @@ async fn cmd_run(args: &RunArgs) -> Result<(), String> {
                         move |completed, total| {
                             pb_clone.set_position(completed as u64);
                             pb_clone.set_message(format!("{}/{} reads", completed, total));
+                            report_atomic_progress(completed as u64, total as u64);
                         },
                     )
                     .map_err(|e| format!("Mapping failed: {}", e))?;
@@ -3346,34 +3411,20 @@ fn cmd_consensus(args: &ConsensusArgs) {
     println!("==========================");
     println!();
 
-    // Parse index paths (split on last ':' to handle Windows paths like C:\...)
-    let mut index_paths: Vec<(PathBuf, usize)> = Vec::new();
+    // Parse index paths (k-value will be read from index file)
+    let mut index_paths: Vec<PathBuf> = Vec::new();
     for idx_arg in &args.indexes {
-        if let Some(colon_pos) = idx_arg.rfind(':') {
-            let path_str = &idx_arg[..colon_pos];
-            let k_str = &idx_arg[colon_pos + 1..];
-            let path = PathBuf::from(path_str);
-            let k: usize = k_str.parse().unwrap_or_else(|e| {
-                eprintln!("Error: invalid k value '{}': {}", k_str, e);
-                std::process::exit(1);
-            });
-            if !path.exists() {
-                eprintln!("Error: index file not found: {}", path.display());
-                std::process::exit(1);
-            }
-            index_paths.push((path, k));
-        } else {
-            eprintln!(
-                "Error: invalid index format '{}'. Expected 'path:k'",
-                idx_arg
-            );
+        let path = PathBuf::from(idx_arg);
+        if !path.exists() {
+            eprintln!("Error: index file not found: {}", path.display());
             std::process::exit(1);
         }
+        index_paths.push(path);
     }
 
     println!("Indexes:");
-    for (path, k) in &index_paths {
-        println!("  k={} → {}", k, path.display());
+    for path in &index_paths {
+        println!("  {}", path.display());
     }
     println!();
 
@@ -3424,27 +3475,6 @@ fn cmd_consensus(args: &ConsensusArgs) {
         args.chunk_size, args.chunk_pct
     );
 
-    // Base mode: use same parallel mapping as standalone map command
-    if args.base {
-        println!("  Base: enabled (same parallel mapping as `map` command)");
-        match consensus.map_reads_to_sam_base(&args.reads, &args.output, args.threads) {
-            Ok((mapped, total)) => {
-                println!();
-                println!("==========================");
-                println!("Done!");
-                println!("  Mapped: {} / {} reads", mapped, total);
-                println!("  Output: {}", args.output.display());
-                println!();
-                println!("Total time: {:.2}s", start.elapsed().as_secs_f64());
-            }
-            Err(e) => {
-                eprintln!("Error: {}", e);
-                std::process::exit(1);
-            }
-        }
-        return;
-    }
-
     // Two-pass mode: map each k separately, then combine (like Python script)
     if args.two_pass {
         println!("  Two-pass: enabled (map each k separately, then combine)");
@@ -3493,6 +3523,106 @@ fn cmd_consensus(args: &ConsensusArgs) {
         Ok((mapped, total)) => {
             println!();
             println!("==========================");
+            println!("Done!");
+            println!("  Mapped: {} / {} reads", mapped, total);
+            println!("  Output: {}", args.output.display());
+            println!();
+            println!("Total time: {:.2}s", start.elapsed().as_secs_f64());
+        }
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_fastcon(args: &FastConArgs) {
+    use std::time::Instant;
+
+    let start = Instant::now();
+    println!("Bit-Pop fast consensus (subprocess)");
+    println!("=====================================");
+    println!();
+
+    // Parse index paths (k-value will be read from index file)
+    let mut index_paths: Vec<PathBuf> = Vec::new();
+    for idx_arg in &args.indexes {
+        let path = PathBuf::from(idx_arg);
+        if !path.exists() {
+            eprintln!("Error: index file not found: {}", path.display());
+            std::process::exit(1);
+        }
+        index_paths.push(path);
+    }
+
+    println!("Indexes:");
+    for path in &index_paths {
+        println!("  {}", path.display());
+    }
+    println!();
+
+    // Auto-detect bit-pop executable
+    let bit_pop_exe = if let Some(ref p) = args.bit_pop {
+        p.clone()
+    } else {
+        // Try to find the current executable's directory
+        let current_exe = std::env::current_exe().unwrap_or_default();
+        let parent = current_exe.parent().unwrap_or(Path::new("."));
+        let candidate = parent.join("bit-pop.exe");
+        if candidate.exists() {
+            candidate
+        } else {
+            // Fallback: look in target/release
+            let script_dir = std::path::PathBuf::from("target/release");
+            let candidate = script_dir.join("bit-pop.exe");
+            if candidate.exists() {
+                candidate
+            } else {
+                eprintln!("Error: bit-pop.exe not found. Use --bit-pop to specify path.");
+                std::process::exit(1);
+            }
+        }
+    };
+
+    println!("bit-pop executable: {}", bit_pop_exe.display());
+    println!();
+
+    // Parse strategy
+    let strategy = match args.strategy.as_str() {
+        "majority" => bit_pop::fastcon::ConsensusStrategy::Majority,
+        "best_score" => bit_pop::fastcon::ConsensusStrategy::BestScore,
+        _ => bit_pop::fastcon::ConsensusStrategy::WeightedScore,
+    };
+
+    let mut fastcon = FastCon::new(index_paths, bit_pop_exe, args.min_score).unwrap_or_else(|e| {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
+    });
+
+    fastcon.strategy = strategy;
+    fastcon.min_k_mappings = args.min_k_mappings;
+    fastcon.map_top_n = args.top_n;
+    fastcon.top_n = args.consensus_top_n;
+
+    println!("[1/3] Configuration");
+    println!("  Reads: {}", args.reads.display());
+    println!("  Output: {}", args.output.display());
+    println!(
+        "  Strategy: {}",
+        match strategy {
+            bit_pop::fastcon::ConsensusStrategy::Majority => "majority",
+            bit_pop::fastcon::ConsensusStrategy::WeightedScore => "weighted_score",
+            bit_pop::fastcon::ConsensusStrategy::BestScore => "best_score",
+        }
+    );
+    println!("  Threads per map: {}", args.threads);
+    println!();
+
+    println!("[2/3] Running consensus...");
+    match fastcon.run(&args.reads, &args.output, args.threads) {
+        Ok((mapped, total)) => {
+            println!();
+            println!("=====================================");
             println!("Done!");
             println!("  Mapped: {} / {} reads", mapped, total);
             println!("  Output: {}", args.output.display());

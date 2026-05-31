@@ -247,17 +247,17 @@ impl SamWriter {
         );
 
         // AS tag: alignment score (raw, before rarity weighting)
-        let as_tag = format!("AS:f:{:.4}", result.score);
+        let as_tag = format!("\tAS:f:{:.4}", result.score);
 
         // RK tag: k-mer rarity
-        let rk_tag = format!("RK:f:{:.6}", result.rarity);
+        let rk_tag = format!("\tRK:f:{:.6}", result.rarity);
 
         // HF tag: homopolymer fingerprint similarity
-        let hf_tag = format!("HF:f:{:.4}", result.hf_score);
+        let hf_tag = format!("\tHF:f:{:.4}", result.hf_score);
 
         // XS tag: suboptimal score for supplementary mappings
         let xs_tag = if is_supplementary {
-            format!("XS:f:{:.4}", result.score)
+            format!("\tXS:f:{:.4}", result.score)
         } else {
             String::new()
         };
