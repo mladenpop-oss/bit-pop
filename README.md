@@ -104,7 +104,7 @@ npm run tauri build
 | Build time | **17 seconds** | Hours to days |
 | Custom genomes | **Trivial** | Requires full taxonomy dump |
 | Offline use | ✅ | ✅ |
-| "Unknown unknown" | ❌ | ✅ |
+| "Unknown unknown" | ⚠️ Requires server infrastructure | ✅ Full NCBI |
 
 **Use Bit-Pop when** you know which organisms to look for. **Use Kraken2 when** you need broad discovery against all of NCBI.
 
