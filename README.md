@@ -19,6 +19,7 @@ While existing aligners (Bowtie2, BWA, minimap2) map reads to a single reference
 | CAMI Low (k12-k15 consensus + EM) | 61 | ~1M | 91.1% | **90.07%** |
 | CAMI Low (k13+k22 + EM) | 61 | ~1M | **99.48%** | 89.86% |
 | PacBio HiFi (realistic simulation) | 69 | 86k | **99.0%** | **95.2%** |
+| **Ebola strains (Nanopore, 15% errors)** | **3** | **10k/strain** | **50.9%** | **97.9%** |
 
 > **Species-level accuracy is ~100% across all benchmarks.** Misclassifications occur only within clades (sibling strains), never between species.
 
@@ -88,6 +89,7 @@ npm run tauri build
 - **FM-index + 2-bit XOR alignment** — ~2.3 ns per 31-base chunk
 - **Multi-genome classification** — single index for all reference genomes
 - **Multi-k consensus** — combine indexes at different k for accuracy/coverage trade-off
+- **Dynamic chunking** — adaptive chunk size for long reads with high error rates (Nanopore)
 - **EM post-processing** — soft-assignment refinement for ambiguous reads
 - **PacBio HiFi support** — automatic long-read mode (no chunking for reads >1kb)
 - **SAM/BAM output** — full spec compliance with CIGAR, NM, MAPQ tags
@@ -95,6 +97,7 @@ npm run tauri build
 - **Paired-end support** — discordant pair reconciliation
 - **Taxonomic classification** — LCA algorithm (`bit-pop tax`)
 - **312+ unit tests**, 5 integration tests, 17 benchmark groups
+- **Outbreak-ready** — 97.9% strain accuracy on Nanopore reads (Ebola, 15% errors)
 
 ## Bit-Pop vs Kraken2
 

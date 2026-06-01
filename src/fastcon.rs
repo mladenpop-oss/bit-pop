@@ -51,6 +51,10 @@ pub struct FastCon {
     pub map_top_n: usize,
     pub k_weights: HashMap<usize, f64>,
     pub bit_pop_exe: PathBuf,
+    pub chunk_size: usize,
+    pub chunk_pct: f64,
+    pub chunk_min: usize,
+    pub chunk_max: usize,
 }
 
 impl FastCon {
@@ -84,6 +88,10 @@ impl FastCon {
             map_top_n: 1,
             k_weights,
             bit_pop_exe,
+            chunk_size: 0,
+            chunk_pct: 0.0,
+            chunk_min: 20,
+            chunk_max: 500,
         })
     }
 
@@ -116,22 +124,42 @@ impl FastCon {
                 sam_path.display()
             );
 
+            let mut args: Vec<String> = vec![
+                "map".into(),
+                "-i".into(),
+                index_path.to_string_lossy().to_string(),
+                "-r".into(),
+                reads_path.to_string_lossy().to_string(),
+                "-o".into(),
+                sam_path.to_string_lossy().to_string(),
+                "-a".into(),
+                "xor".into(),
+                "--top-n".into(),
+                self.map_top_n.to_string(),
+                "-t".into(),
+                threads.to_string(),
+            ];
+
+            if self.chunk_pct > 0.0 {
+                args.push("--chunk-pct".into());
+                args.push(self.chunk_pct.to_string());
+            } else if self.chunk_size > 0 {
+                args.push("--chunk-size".into());
+                args.push(self.chunk_size.to_string());
+            }
+
+            if self.chunk_min != 20 {
+                args.push("--chunk-min".into());
+                args.push(self.chunk_min.to_string());
+            }
+
+            if self.chunk_max != 500 {
+                args.push("--chunk-max".into());
+                args.push(self.chunk_max.to_string());
+            }
+
             let mut child = Command::new(&self.bit_pop_exe)
-                .args([
-                    "map",
-                    "-i",
-                    &index_path.to_string_lossy(),
-                    "-r",
-                    &reads_path.to_string_lossy(),
-                    "-o",
-                    &sam_path.to_string_lossy(),
-                    "-a",
-                    "xor",
-                    "--top-n",
-                    &self.map_top_n.to_string(),
-                    "-t",
-                    &threads.to_string(),
-                ])
+                .args(&args)
                 .stdout(std::process::Stdio::inherit())
                 .stderr(std::process::Stdio::inherit())
                 .spawn()

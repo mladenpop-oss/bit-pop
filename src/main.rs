@@ -195,15 +195,15 @@ struct RunArgs {
 
     /// Chunk size as percentage of read length (0.0-1.0, e.g. 0.01 = 1%).
     /// Overrides --chunk-size when set. Enables dynamic per-read chunk sizing.
-    /// Clamped to [chunk_min, chunk_max] range (default: 50-200bp).
+    /// Clamped to [chunk_min, chunk_max] range (default: 20-500bp).
     #[arg(long)]
     chunk_pct: Option<f64>,
 
-    /// Minimum chunk size clamp for dynamic chunking (overrides default 50bp).
+    /// Minimum chunk size clamp for dynamic chunking (overrides default 20bp).
     #[arg(long)]
     chunk_min: Option<usize>,
 
-    /// Maximum chunk size clamp for dynamic chunking (overrides default 200bp).
+    /// Maximum chunk size clamp for dynamic chunking (overrides default 500bp).
     #[arg(long)]
     chunk_max: Option<usize>,
 
@@ -389,15 +389,15 @@ struct MapArgs {
 
     /// Chunk size as percentage of read length (0.0-1.0, e.g. 0.01 = 1%).
     /// Overrides --chunk-size when set. Enables dynamic per-read chunk sizing.
-    /// Clamped to [chunk_min, chunk_max] range (default: 50-200bp).
+    /// Clamped to [chunk_min, chunk_max] range (default: 20-500bp).
     #[arg(long)]
     chunk_pct: Option<f64>,
 
-    /// Minimum chunk size clamp for dynamic chunking (overrides default 50bp).
+    /// Minimum chunk size clamp for dynamic chunking (overrides default 20bp).
     #[arg(long)]
     chunk_min: Option<usize>,
 
-    /// Maximum chunk size clamp for dynamic chunking (overrides default 200bp).
+    /// Maximum chunk size clamp for dynamic chunking (overrides default 500bp).
     #[arg(long)]
     chunk_max: Option<usize>,
 
@@ -637,12 +637,12 @@ struct ConsensusArgs {
     #[arg(long, default_value = "0.0")]
     chunk_pct: f64,
 
-    /// Minimum chunk size in bp
-    #[arg(long, default_value = "50")]
+    /// Minimum chunk size in bp (default: 20)
+    #[arg(long, default_value = "20")]
     chunk_min: usize,
 
-    /// Maximum chunk size in bp
-    #[arg(long, default_value = "200")]
+    /// Maximum chunk size in bp (default: 500)
+    #[arg(long, default_value = "500")]
     chunk_max: usize,
 
     /// Enable SNP detection
@@ -724,6 +724,22 @@ struct FastConArgs {
     #[arg(long, default_value = "1")]
     consensus_top_n: usize,
 
+    /// Chunk size for long reads (0 = no chunking)
+    #[arg(long, default_value = "0")]
+    chunk_size: usize,
+
+    /// Chunk size as percentage of read length (0.0-1.0, 0 = disabled)
+    #[arg(long, default_value = "0.0")]
+    chunk_pct: f64,
+
+    /// Minimum chunk size in bp (default: 20)
+    #[arg(long, default_value = "20")]
+    chunk_min: usize,
+
+    /// Maximum chunk size in bp (default: 500)
+    #[arg(long, default_value = "500")]
+    chunk_max: usize,
+
     /// Path to bit-pop executable (auto-detected)
     #[arg(long)]
     bit_pop: Option<PathBuf>,
@@ -759,12 +775,12 @@ struct ChunkConsensusArgs {
     #[arg(long)]
     min_agreement: Option<usize>,
 
-    /// Minimum chunk size in bp (default: 50)
-    #[arg(long, default_value = "50")]
+    /// Minimum chunk size in bp (default: 20)
+    #[arg(long, default_value = "20")]
     chunk_min: usize,
 
-    /// Maximum chunk size in bp (default: 200)
-    #[arg(long, default_value = "200")]
+    /// Maximum chunk size in bp (default: 500)
+    #[arg(long, default_value = "500")]
     chunk_max: usize,
 
     /// Number of threads
@@ -3603,6 +3619,10 @@ fn cmd_fastcon(args: &FastConArgs) {
     fastcon.min_k_mappings = args.min_k_mappings;
     fastcon.map_top_n = args.top_n;
     fastcon.top_n = args.consensus_top_n;
+    fastcon.chunk_size = args.chunk_size;
+    fastcon.chunk_pct = args.chunk_pct;
+    fastcon.chunk_min = args.chunk_min;
+    fastcon.chunk_max = args.chunk_max;
 
     println!("[1/3] Configuration");
     println!("  Reads: {}", args.reads.display());
@@ -3616,6 +3636,16 @@ fn cmd_fastcon(args: &FastConArgs) {
         }
     );
     println!("  Threads per map: {}", args.threads);
+    if args.chunk_pct > 0.0 {
+        println!(
+            "  Chunk pct: {:.2}% (dynamic, clamped {}-{}bp)",
+            args.chunk_pct * 100.0,
+            args.chunk_min,
+            args.chunk_max
+        );
+    } else if args.chunk_size > 0 {
+        println!("  Chunk size: {}bp (fixed)", args.chunk_size);
+    }
     println!();
 
     println!("[2/3] Running consensus...");
