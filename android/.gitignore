@@ -1,0 +1,12 @@
+*.apk
+*.so
+*.log
+build/
+app/build/
+.gradle/
+local.properties
+/.idea/
+*.iml
+/.cache
+/.gradle
+android/app/src/main/jniLibs/

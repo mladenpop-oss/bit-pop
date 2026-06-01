@@ -23,9 +23,15 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 thiserror = "2"
 indicatif = "0.17"
 flate2 = "1.0"
+jni = { version = "0.21", optional = true }
+
+[lib]
+crate-type = ["rlib", "cdylib"]
 
 [features]
+default = []
 mmap = []
+android = ["jni"]
 
 [dev-dependencies]
 criterion = "0.5"

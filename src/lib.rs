@@ -97,6 +97,8 @@ pub mod chunk_consensus;
 pub mod consensus;
 pub mod delta;
 pub mod em;
+#[cfg(feature = "android")]
+pub mod jni;
 pub mod fasta;
 pub mod fastcon;
 pub mod fastq;
