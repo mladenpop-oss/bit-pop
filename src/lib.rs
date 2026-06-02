@@ -97,14 +97,14 @@ pub mod chunk_consensus;
 pub mod consensus;
 pub mod delta;
 pub mod em;
-#[cfg(feature = "android")]
-pub mod jni;
 pub mod fasta;
 pub mod fastcon;
 pub mod fastq;
 pub mod fm;
 pub mod hf;
 pub mod index_manager;
+#[cfg(feature = "android")]
+pub mod jni;
 pub mod ncbi;
 pub mod persisted;
 pub mod rank;

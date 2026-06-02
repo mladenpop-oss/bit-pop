@@ -2,7 +2,7 @@ use jni::objects::{JClass, JString};
 use jni::sys::{jint, jstring};
 use jni::JNIEnv;
 
-use crate::{BitPop, fastq};
+use crate::{fastq, BitPop};
 
 #[no_mangle]
 pub extern "system" fn Java_com_bitpop_MainActivity_mapReads(
@@ -25,10 +25,7 @@ pub extern "system" fn Java_com_bitpop_MainActivity_mapReads(
             let mapped = bp.map_read(&seq, 10);
             if let Some(best) = mapped.first() {
                 let genome_name = bp.genome_name(best.genome_id).unwrap_or("unknown");
-                results.push(format!(
-                    "{}\t{}\t{:.2}",
-                    name, genome_name, best.score
-                ));
+                results.push(format!("{}\t{}\t{:.2}", name, genome_name, best.score));
             }
         }
 
