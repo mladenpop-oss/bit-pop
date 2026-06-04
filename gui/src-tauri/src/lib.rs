@@ -170,6 +170,8 @@ async fn run_map(
     threads: u32,
     use_top_n: bool,
     top_n: u32,
+    use_chunk_pct: bool,
+    chunk_pct: f64,
 ) -> Result<String, String> {
     let bit_pop_path = get_bitpop_path();
     let repo_root = get_repo_root();
@@ -182,21 +184,24 @@ async fn run_map(
 
     let top_n_val = if use_top_n { top_n.to_string() } else { "1".to_string() };
 
+    let mut args = vec![
+        "map".to_string(),
+        "-i".to_string(), index.clone(),
+        "-r".to_string(), reads.clone(),
+        "-o".to_string(), output.clone(),
+        "-a".to_string(), align_mode.clone(),
+        "-t".to_string(), threads.to_string(),
+        "--top-n".to_string(), top_n_val,
+    ];
+
+    if use_chunk_pct {
+        args.push("--chunk-pct".to_string());
+        args.push(chunk_pct.to_string());
+    }
+
     let mut child = TokioCommand::new(&bit_pop_path)
         .current_dir(&repo_root)
-        .arg("map")
-        .arg("-i")
-        .arg(&index)
-        .arg("-r")
-        .arg(&reads)
-        .arg("-o")
-        .arg(&output)
-        .arg("-a")
-        .arg(&align_mode)
-        .arg("-t")
-        .arg(threads.to_string())
-        .arg("--top-n")
-        .arg(top_n_val)
+        .args(&args)
         .env("BITPOP_PROGRESS", "atomic")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -241,6 +246,8 @@ async fn run_fastcon(
     use_top_n: bool,
     top_n: u32,
     consensus_top_n: u32,
+    use_chunk_pct: bool,
+    chunk_pct: f64,
 ) -> Result<String, String> {
     let bit_pop_path = get_bitpop_path();
     let repo_root = get_repo_root();
@@ -274,6 +281,11 @@ async fn run_fastcon(
 
     args.push("--strategy".to_string());
     args.push("weighted_score".to_string());
+
+    if use_chunk_pct {
+        args.push("--chunk-pct".to_string());
+        args.push(chunk_pct.to_string());
+    }
 
    let mut child = TokioCommand::new(&bit_pop_path)
         .current_dir(&repo_root)

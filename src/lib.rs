@@ -610,6 +610,25 @@ impl fmt::Display for ChunkAnchorStrategy {
     }
 }
 
+/// Score aggregation mode for chunk-based mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ChunkScoreMode {
+    /// Quality-weighted: score*score sum, sqrt normalization (default, more selective)
+    #[default]
+    Quality,
+    /// Base: raw score sum, like JNI Android (maps more reads)
+    Base,
+}
+
+impl fmt::Display for ChunkScoreMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ChunkScoreMode::Quality => write!(f, "quality"),
+            ChunkScoreMode::Base => write!(f, "base"),
+        }
+    }
+}
+
 impl fmt::Display for AlignMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -738,6 +757,15 @@ pub struct BitPop {
     /// Anchor strategy for chunk-based mapping (Rarest, Golden, Spaced)
     chunk_anchor_strategy: ChunkAnchorStrategy,
 
+    /// Score aggregation mode for chunk-based mapping (Quality, Base)
+    chunk_score_mode: ChunkScoreMode,
+
+    /// Minimum anchor score threshold for chunk-based mapping (default: 0.5)
+    chunk_anchor_min_score: f64,
+
+    /// Use legacy anchor_filter for chunks (instead of full map_read pipeline)
+    chunk_use_anchor_filter: bool,
+
     /// Enable homopolymer fingerprint scoring
     enable_hf: bool,
 
@@ -796,6 +824,9 @@ impl BitPop {
             snp_penalty: 0.1,
             align_mode: AlignMode::Xor,
             chunk_anchor_strategy: ChunkAnchorStrategy::Rarest,
+            chunk_score_mode: ChunkScoreMode::Quality,
+            chunk_anchor_min_score: 0.5,
+            chunk_use_anchor_filter: false,
             enable_hf: false,
             hf_min_run: 3,
             hf_profiles: HashMap::new(),
@@ -971,6 +1002,36 @@ impl BitPop {
     /// Get the current chunk anchor strategy.
     pub fn chunk_anchor_strategy(&self) -> ChunkAnchorStrategy {
         self.chunk_anchor_strategy
+    }
+
+    /// Set the score aggregation mode for chunk-based mapping.
+    pub fn set_chunk_score_mode(&mut self, mode: ChunkScoreMode) {
+        self.chunk_score_mode = mode;
+    }
+
+    /// Get the current chunk score mode.
+    pub fn chunk_score_mode(&self) -> ChunkScoreMode {
+        self.chunk_score_mode
+    }
+
+    /// Set the minimum anchor score threshold for chunk-based mapping.
+    pub fn set_chunk_anchor_min_score(&mut self, min_score: f64) {
+        self.chunk_anchor_min_score = min_score;
+    }
+
+    /// Get the current chunk anchor min score threshold.
+    pub fn chunk_anchor_min_score(&self) -> f64 {
+        self.chunk_anchor_min_score
+    }
+
+    /// Set whether to use legacy anchor_filter for chunks (instead of full map_read).
+    pub fn set_chunk_use_anchor_filter(&mut self, use_anchor_filter: bool) {
+        self.chunk_use_anchor_filter = use_anchor_filter;
+    }
+
+    /// Get the current chunk use anchor_filter setting.
+    pub fn chunk_use_anchor_filter(&self) -> bool {
+        self.chunk_use_anchor_filter
     }
 
     /// Enable or disable SNP-aware scoring for strain resolution.
@@ -3790,6 +3851,9 @@ impl BitPop {
             snp_penalty: 0.1,
             align_mode: AlignMode::Xor,
             chunk_anchor_strategy: ChunkAnchorStrategy::Rarest,
+            chunk_score_mode: ChunkScoreMode::Quality,
+            chunk_anchor_min_score: 0.5,
+            chunk_use_anchor_filter: false,
             enable_hf: false,
             hf_min_run: 3,
             hf_profiles: HashMap::new(),
@@ -4823,12 +4887,22 @@ impl BitPop {
                 let q_end = (chunk_start + chunk_seq.len()).min(q.len());
                 &q[chunk_start..q_end]
             });
-            let chunk_results = self.anchor_filter_for_chunk(
-                chunk_seq,
-                chunk_quality,
-                0.5,
-                DEFAULT_REPEAT_THRESHOLD,
-            );
+            let chunk_results = if self.chunk_use_anchor_filter {
+                // Legacy anchor_filter mode (for testing/comparison)
+                self.anchor_filter_for_chunk(
+                    chunk_seq,
+                    chunk_quality,
+                    self.chunk_anchor_min_score,
+                    DEFAULT_REPEAT_THRESHOLD,
+                )
+            } else {
+                // Default: full map_read pipeline (like JNI Android)
+                let mapped = self.map_read(chunk_seq, context_window);
+                mapped
+                    .into_iter()
+                    .map(|r| (r.genome_id, r.position, r.score, r.cigar))
+                    .collect::<Vec<_>>()
+            };
             if chunk_results.is_empty() {
                 continue;
             }
@@ -4871,7 +4945,9 @@ impl BitPop {
             vote.total_score += score;
             vote.chunks_mapped += 1;
             vote.avg_score = vote.total_score / vote.chunks_mapped as f64;
-            vote.quality_weighted_score += score * score;
+            if self.chunk_score_mode == ChunkScoreMode::Quality {
+                vote.quality_weighted_score += score * score;
+            }
         }
 
         if genome_votes.is_empty() {
@@ -4880,8 +4956,14 @@ impl BitPop {
 
         let mut genome_ranking: Vec<(&u32, &ChunkVote)> = genome_votes.iter().collect();
         genome_ranking.sort_by(|a, b| {
-            let score_a = a.1.quality_weighted_score / total_chunks as f64;
-            let score_b = b.1.quality_weighted_score / total_chunks as f64;
+            let (score_a, score_b) = if self.chunk_score_mode == ChunkScoreMode::Base {
+                (a.1.total_score, b.1.total_score)
+            } else {
+                (
+                    a.1.quality_weighted_score / total_chunks as f64,
+                    b.1.quality_weighted_score / total_chunks as f64,
+                )
+            };
             let fraction_a = a.1.win_count as f64 / total_chunks as f64;
             let fraction_b = b.1.win_count as f64 / total_chunks as f64;
             score_a
@@ -4925,8 +5007,12 @@ impl BitPop {
             .into_iter()
             .take(top_n)
             .map(|(genome_id, vote)| {
-                let normalized_weighted_score = vote.quality_weighted_score / total_chunks as f64;
-                let align_score = normalized_weighted_score.sqrt().clamp(0.0, 1.0);
+                let align_score = if self.chunk_score_mode == ChunkScoreMode::Base {
+                    (vote.total_score / total_chunks as f64).clamp(0.0, 1.0)
+                } else {
+                    let normalized = vote.quality_weighted_score / total_chunks as f64;
+                    normalized.sqrt().clamp(0.0, 1.0)
+                };
 
                 let combined_score = if self.enable_snp_detect {
                     // SNP-aware scoring: penalize low scores that aren't supported by known SNPs

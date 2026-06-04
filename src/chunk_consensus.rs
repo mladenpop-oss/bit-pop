@@ -55,6 +55,8 @@ pub enum ConsensusStrategy {
     #[default]
     Majority,
     WeightedScore,
+    /// Raw score sum (no chunk-weight), like JNI Android
+    BaseScore,
 }
 
 /// Load a single BitPop instance from file with the given chunk_pct.
@@ -63,12 +65,14 @@ fn load_instance(
     chunk_pct: f64,
     chunk_min: usize,
     chunk_max: usize,
+    anchor_min_score: f64,
 ) -> Result<BitPop, String> {
     let mut bp = BitPop::deserialize_from_file(path)
         .map_err(|e| format!("Failed to load index {}: {}", path, e))?;
     bp.set_chunk_pct(chunk_pct);
     bp.set_chunk_min(chunk_min);
     bp.set_chunk_max(chunk_max);
+    bp.set_chunk_anchor_min_score(anchor_min_score);
     Ok(bp)
 }
 
@@ -80,6 +84,7 @@ impl MultiChunkConsensus {
         chunk_min: usize,
         chunk_max: usize,
         min_score: f64,
+        anchor_min_score: f64,
     ) -> Result<Self, String> {
         let mut bp_instances = Vec::new();
 
@@ -90,7 +95,7 @@ impl MultiChunkConsensus {
                 pct * 100.0,
                 index_path
             );
-            let bp = load_instance(index_path, pct, chunk_min, chunk_max)?;
+            let bp = load_instance(index_path, pct, chunk_min, chunk_max, anchor_min_score)?;
             bp_instances.push(bp);
         }
 
@@ -153,6 +158,7 @@ impl MultiChunkConsensus {
         let candidates = match self.strategy {
             ConsensusStrategy::Majority => self.vote_majority(&all_chunk_results),
             ConsensusStrategy::WeightedScore => self.vote_weighted(&all_chunk_results),
+            ConsensusStrategy::BaseScore => self.vote_base_score(&all_chunk_results),
         };
 
         // Filter: only keep candidates that meet min_agreement threshold
@@ -232,6 +238,45 @@ impl MultiChunkConsensus {
             .collect();
         candidates.sort_by(|a, b| {
             a.2.partial_cmp(&b.2)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.1.cmp(&a.1))
+        });
+
+        candidates
+            .into_iter()
+            .map(|(id, count, total_score, name, rs)| ChunkConsensusResult {
+                genome_id: id,
+                genome_name: name,
+                vote_count: count,
+                config_count: results.len(),
+                consensus_score: total_score / results.len() as f64,
+                chunk_results: rs,
+            })
+            .collect()
+    }
+
+    fn vote_base_score(&self, results: &[ChunkResult]) -> Vec<ChunkConsensusResult> {
+        let mut genome_scores: HashMap<u32, (usize, f64, String, Vec<ChunkResult>)> =
+            HashMap::new();
+
+        for r in results {
+            let entry = genome_scores.entry(r.genome_id).or_insert((
+                0,
+                0.0,
+                r.genome_name.clone(),
+                Vec::new(),
+            ));
+            entry.0 += 1;
+            entry.1 += r.score;
+            entry.3.push(r.clone());
+        }
+
+        let mut candidates: Vec<_> = genome_scores
+            .into_iter()
+            .map(|(id, (count, score, name, rs))| (id, count, score, name, rs))
+            .collect();
+        candidates.sort_by(|a, b| {
+            b.2.partial_cmp(&a.2)
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| b.1.cmp(&a.1))
         });

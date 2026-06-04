@@ -17,6 +17,8 @@ pub enum ConsensusStrategy {
     WeightedScore,
     /// Union mode: take best score from any k, no voting
     BestScore,
+    /// Raw score sum (no k-weight), like JNI Android
+    BaseScore,
 }
 
 /// Per-k mapping result for a single read.
@@ -172,6 +174,7 @@ impl MultiKConsensus {
             ConsensusStrategy::WeightedScore | ConsensusStrategy::BestScore => {
                 self.vote_weighted_multi(&all_k_results)
             }
+            ConsensusStrategy::BaseScore => self.vote_base_score(&all_k_results),
         };
 
         let limit = if self.top_n > 1 { self.top_n } else { 1 };
@@ -246,6 +249,42 @@ impl MultiKConsensus {
             .into_iter()
             .map(|(_id, vote_count, total_score, name, kr)| ConsensusResult {
                 genome_id: _id,
+                genome_name: name,
+                vote_count,
+                k_count: k_results.len(),
+                consensus_score: total_score / k_results.len() as f64,
+                k_results: kr,
+            })
+            .collect()
+    }
+
+    fn vote_base_score(&self, k_results: &[KResult]) -> Vec<ConsensusResult> {
+        let mut genome_scores: HashMap<u32, (usize, f64, String, Vec<KResult>)> = HashMap::new();
+
+        for kr in k_results {
+            let entry = genome_scores.entry(kr.genome_id).or_insert((
+                0,
+                0.0,
+                kr.genome_name.clone(),
+                Vec::new(),
+            ));
+            entry.0 += 1;
+            entry.1 += kr.score;
+            entry.3.push(kr.clone());
+        }
+
+        let mut candidates: Vec<_> = genome_scores
+            .into_iter()
+            .map(|(id, (vote_count, total_score, name, kr))| {
+                (id, vote_count, total_score, name, kr)
+            })
+            .collect();
+        candidates.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+
+        candidates
+            .into_iter()
+            .map(|(id, vote_count, total_score, name, kr)| ConsensusResult {
+                genome_id: id,
                 genome_name: name,
                 vote_count,
                 k_count: k_results.len(),
@@ -648,6 +687,7 @@ impl MultiKConsensus {
                 ConsensusStrategy::Majority => "majority",
                 ConsensusStrategy::WeightedScore => "weighted_score",
                 ConsensusStrategy::BestScore => "best_score",
+                ConsensusStrategy::BaseScore => "base_score",
             }
         );
 
@@ -730,6 +770,7 @@ impl MultiKConsensus {
                 }
                 ConsensusStrategy::Majority => self.vote_majority_multi(&filtered),
                 ConsensusStrategy::WeightedScore => self.vote_weighted_multi(&filtered),
+                ConsensusStrategy::BaseScore => self.vote_base_score(&filtered),
             };
 
             let limit = if self.top_n > 1 { self.top_n } else { 1 };

@@ -38,6 +38,8 @@ bit-pop/
 ├── gui/                # Desktop GUI (Svelte + Tauri)
 │   ├── src/            # Svelte frontend
 │   └── src-tauri/      # Tauri Rust backend
+├── android/            # Android app (JNI bindings)
+│   └── ...             # Native Java/Kotlin + Rust JNI
 └── Cargo.toml
 ```
 
@@ -71,8 +73,12 @@ bit-pop/
 - NCBI E-utilities integration (`--ncbi`)
 - Taxonomic classification with LCA (`bit-pop tax`)
 - Auto index caching (reuses `.bitpop` when genomes unchanged)
+- Chunk map_read default (JNI parity, `--anchor-filter` for legacy mode)
+- Anchor min-score control (`--anchor-min-score`)
+- Chunk percentage control (`--chunk-pct` in CLI and GUI)
 - Large genome workflow (`scripts/bitpop-workflow.py`)
-- Desktop GUI (Tauri + Svelte)
+- Desktop GUI (Tauri + Svelte, chunk-pct control)
+- Android JNI bindings (identical algorithm to CLI)
 - Docker container
 - Bioconda package
 
@@ -80,6 +86,7 @@ bit-pop/
 - Quick benchmark: 3 genomes, 99.9% accuracy
 - CAMI Low: 61 genomes, ~1M reads, 92.29% strain / ~100% species accuracy
 - PacBio HiFi: 69 genomes, 86k long reads, 95.2% accuracy
+- Ebola Nanopore: 3 strains, 99.98% accuracy (15% error reads, CLI + Android JNI parity)
 
 ### 🔧 In Progress
 
@@ -143,6 +150,18 @@ proximity   = kmer_count / read_length
 ### Long Read Mode
 
 Chunking is automatically disabled for reads >1,000 bp. Direct FM-index alignment for long reads outperforms chunk-based voting by +12.6pp accuracy (PacBio HiFi benchmark).
+
+### Chunk Mapping Modes
+
+**Default: `map_read` (JNI mode)**
+- Full pipeline: forward + reverse complement, rarity scoring, HF scoring, context window
+- Used by Android JNI and CLI (default since v0.2.0)
+- Higher accuracy, higher coverage
+
+**Legacy: `anchor_filter` (--anchor-filter flag)**
+- Simplified: single min_score filter, no reverse complement
+- Lower coverage, faster
+- Available for testing/comparison only
 
 ### Index Format (.bitpop)
 

@@ -221,6 +221,20 @@ struct RunArgs {
     #[arg(long, default_value = "rarest")]
     chunk_strategy: String,
 
+    /// Score aggregation mode for chunk-based mapping: quality (default, score*score), base (raw sum, like JNI Android)
+    #[arg(long, default_value = "quality")]
+    score_mode: String,
+
+    /// Minimum anchor score threshold for chunk-based mapping (default: 0.5).
+    /// Use 0.0 to match JNI Android behavior (no filtering).
+    #[arg(long, default_value = "0.5")]
+    anchor_min_score: f64,
+
+    /// Use legacy anchor_filter for chunks (instead of full map_read pipeline).
+    /// For testing/comparison with older behavior.
+    #[arg(long)]
+    anchor_filter: bool,
+
     /// Enable SNP-aware scoring for strain resolution.
     /// Collects mismatches across all reads, builds a SNP map, and boosts
     /// scores for genomes with known strain-specific SNPs.
@@ -415,6 +429,19 @@ struct MapArgs {
     #[arg(long, default_value = "rarest")]
     chunk_strategy: String,
 
+    /// Score aggregation mode for chunk-based mapping: quality (default, score*score), base (raw sum, like JNI Android)
+    #[arg(long, default_value = "quality")]
+    score_mode: String,
+
+    /// Minimum anchor score threshold for chunk-based mapping (default: 0.5).
+    /// Use 0.0 to match JNI Android behavior (no filtering).
+    #[arg(long, default_value = "0.5")]
+    anchor_min_score: f64,
+
+    /// Use full map_read pipeline for chunks (like JNI Android) instead of anchor_filter.
+    #[arg(long)]
+    anchor_filter: bool,
+
     /// Enable SNP-aware scoring for strain resolution.
     #[arg(long)]
     snp_detect: bool,
@@ -454,6 +481,10 @@ struct MapArgs {
     /// Minimum score for second pass (default: 0.5)
     #[arg(long, default_value = "0.5")]
     second_pass_score: f64,
+
+    /// Context window size for alignment (flanking bases, default: 50)
+    #[arg(long, default_value = "50")]
+    context_window: usize,
 }
 
 #[derive(clap::Args)]
@@ -621,7 +652,7 @@ struct ConsensusArgs {
     #[arg(short, long, required = true)]
     output: PathBuf,
 
-    /// Strategy: weighted_score (default), majority, best_score (union - best from any k)
+    /// Strategy: weighted_score (default), majority, best_score (union), base_score (raw sum, no k-weight)
     #[arg(long, default_value = "weighted_score")]
     strategy: String,
 
@@ -684,6 +715,14 @@ struct ConsensusArgs {
     /// Two-pass mode: map each k separately (faster, like Python script)
     #[arg(long)]
     two_pass: bool,
+
+    /// Minimum anchor score threshold for chunk-based mapping (default: 0.5)
+    #[arg(long, default_value = "0.5")]
+    anchor_min_score: f64,
+
+    /// Use full map_read pipeline for chunks (like JNI Android)
+    #[arg(long)]
+    anchor_filter: bool,
 }
 
 #[derive(clap::Args)]
@@ -700,7 +739,7 @@ struct FastConArgs {
     #[arg(short, long, required = true)]
     output: PathBuf,
 
-    /// Strategy: weighted_score (default), majority, best_score
+    /// Strategy: weighted_score (default), majority, best_score, base_score (raw sum, no k-weight)
     #[arg(long, default_value = "weighted_score")]
     strategy: String,
 
@@ -743,6 +782,18 @@ struct FastConArgs {
     /// Path to bit-pop executable (auto-detected)
     #[arg(long)]
     bit_pop: Option<PathBuf>,
+
+    /// Context window size for alignment (flanking bases, default: 50)
+    #[arg(long, default_value = "50")]
+    context_window: usize,
+
+    /// Minimum anchor score threshold for chunk-based mapping (default: 0.5)
+    #[arg(long, default_value = "0.5")]
+    anchor_min_score: f64,
+
+    /// Use full map_read pipeline for chunks (like JNI Android)
+    #[arg(long)]
+    anchor_filter: bool,
 }
 
 #[derive(clap::Args)]
@@ -763,7 +814,7 @@ struct ChunkConsensusArgs {
     #[arg(short = 'c', long, required = true)]
     chunk_pcts: String,
 
-    /// Voting strategy: majority (default), weighted_score
+    /// Voting strategy: majority (default), weighted_score, base_score (raw sum, no chunk-weight)
     #[arg(long, default_value = "majority")]
     strategy: String,
 
@@ -802,6 +853,14 @@ struct ChunkConsensusArgs {
     /// Max RAM to use for streaming (e.g., "32G", "16GB"). Auto-calculates chunk size.
     #[arg(long)]
     max_ram: Option<String>,
+
+    /// Minimum anchor score threshold for chunk-based mapping (default: 0.5)
+    #[arg(long, default_value = "0.5")]
+    anchor_min_score: f64,
+
+    /// Use full map_read pipeline for chunks (like JNI Android)
+    #[arg(long)]
+    anchor_filter: bool,
 }
 
 #[derive(clap::Args)]
@@ -1406,6 +1465,7 @@ fn cmd_map(args: &MapArgs, verbose: bool) {
     if args.top_n > 1 {
         bp.set_top_n(args.top_n);
     }
+    println!("  top_n: {}", bp.top_n());
 
     if args.method != "none" {
         let fuzzy_method = match args.method.as_str() {
@@ -1490,6 +1550,25 @@ fn cmd_map(args: &MapArgs, verbose: bool) {
     bp.set_chunk_anchor_strategy(chunk_strategy);
     if args.chunk_strategy != "rarest" {
         println!("  Chunk strategy: {}", args.chunk_strategy);
+    }
+
+    let score_mode = match args.score_mode.as_str() {
+        "base" => bit_pop::ChunkScoreMode::Base,
+        _ => bit_pop::ChunkScoreMode::Quality,
+    };
+    bp.set_chunk_score_mode(score_mode);
+    if args.score_mode != "quality" {
+        println!("  Score mode: {}", args.score_mode);
+    }
+
+    bp.set_chunk_anchor_min_score(args.anchor_min_score);
+    if args.anchor_min_score != 0.5 {
+        println!("  Anchor min score: {}", args.anchor_min_score);
+    }
+
+    if args.anchor_filter {
+        bp.set_chunk_use_anchor_filter(true);
+        println!("  Anchor filter: enabled (legacy mode)");
     }
 
     if args.snp_detect {
@@ -1666,19 +1745,20 @@ fn cmd_map(args: &MapArgs, verbose: bool) {
                     .template("{spinner} Mapping reads: [{elapsed_precise} {bar:40} {pos}/{len}] {msg}")
                     .unwrap());
 
+                let ctx_window = args.context_window;
                 let mapped: Vec<(String, String, Vec<bit_pop::QualityMappingResult>)> = reads
                     .iter()
                     .enumerate()
                     .map(|(i, (name, seq, qual))| {
                         let results = if args.golden_anchors {
-                            bp.map_read_with_golden_anchors(seq, qual, align_mode, 50)
+                            bp.map_read_with_golden_anchors(seq, qual, align_mode, ctx_window)
                         } else {
                             bp.map_read_with_quality_mode(
                                 seq,
                                 qual,
                                 align_mode,
                                 args.min_quality,
-                                50,
+                                ctx_window,
                             )
                         };
                         if (i + 1) % 10 == 0 || i + 1 == total {
@@ -1726,7 +1806,7 @@ fn cmd_map(args: &MapArgs, verbose: bool) {
                         .map_reads_parallel_with_progress(
                             &reads_refs,
                             args.output.to_str().unwrap(),
-                            50,
+                            args.context_window,
                             if total > 1000 { 100 } else { 10 },
                             move |completed, total| {
                                 pb_clone.set_position(completed as u64);
@@ -1749,7 +1829,7 @@ fn cmd_map(args: &MapArgs, verbose: bool) {
                         .map_reads_to_output_with_progress(
                             &reads_refs,
                             args.output.to_str().unwrap(),
-                            50,
+                            args.context_window,
                             if total > 1000 { 100 } else { 10 },
                             args.bam,
                             move |completed, total| {
@@ -1784,7 +1864,7 @@ fn cmd_map(args: &MapArgs, verbose: bool) {
             bp.map_reads_with_chunking_parallel_with_progress(
                 &reads_refs,
                 args.output.to_str().unwrap(),
-                50,
+                args.context_window,
                 move |completed, total| {
                     pb_clone.set_position(completed as u64);
                     pb_clone.set_message(format!("{}/{} reads", completed, total));
@@ -1796,7 +1876,7 @@ fn cmd_map(args: &MapArgs, verbose: bool) {
             bp.map_reads_parallel_with_progress(
                 &reads_refs,
                 args.output.to_str().unwrap(),
-                50,
+                args.context_window,
                 if total > 1000 { 100 } else { 10 },
                 move |completed, total| {
                     pb_clone.set_position(completed as u64);
@@ -1828,7 +1908,7 @@ fn cmd_map(args: &MapArgs, verbose: bool) {
             bp.map_reads_with_chunking_parallel_with_progress(
                 &reads_refs,
                 args.output.to_str().unwrap(),
-                50,
+                args.context_window,
                 move |completed, total| {
                     pb_clone.set_position(completed as u64);
                     pb_clone.set_message(format!("{}/{} reads", completed, total));
@@ -1840,7 +1920,7 @@ fn cmd_map(args: &MapArgs, verbose: bool) {
             bp.map_reads_to_output_with_progress(
                 &reads_refs,
                 args.output.to_str().unwrap(),
-                50,
+                args.context_window,
                 if total > 1000 { 100 } else { 10 },
                 args.bam,
                 move |completed, total| {
@@ -2877,6 +2957,25 @@ async fn cmd_run(args: &RunArgs) -> Result<(), String> {
         println!("  Chunk strategy: {}", args.chunk_strategy);
     }
 
+    let score_mode = match args.score_mode.as_str() {
+        "base" => bit_pop::ChunkScoreMode::Base,
+        _ => bit_pop::ChunkScoreMode::Quality,
+    };
+    bp.set_chunk_score_mode(score_mode);
+    if args.score_mode != "quality" {
+        println!("  Score mode: {}", args.score_mode);
+    }
+
+    bp.set_chunk_anchor_min_score(args.anchor_min_score);
+    if args.anchor_min_score != 0.5 {
+        println!("  Anchor min score: {}", args.anchor_min_score);
+    }
+
+    if args.anchor_filter {
+        bp.set_chunk_use_anchor_filter(true);
+        println!("  Anchor filter: enabled (legacy mode)");
+    }
+
     if args.snp_detect {
         bp.set_snp_detect(true);
         bp.set_snp_min_support(args.snp_min_support);
@@ -3448,6 +3547,7 @@ fn cmd_consensus(args: &ConsensusArgs) {
     let strategy = match args.strategy.as_str() {
         "majority" => ConsensusStrategy::Majority,
         "best_score" => ConsensusStrategy::BestScore,
+        "base_score" => ConsensusStrategy::BaseScore,
         _ => ConsensusStrategy::WeightedScore,
     };
 
@@ -3462,6 +3562,8 @@ fn cmd_consensus(args: &ConsensusArgs) {
     // Set top_n on each BitPop index (controls rare k-mer anchors)
     for bp in consensus.indexes.values_mut() {
         bp.set_top_n(args.top_n);
+        bp.set_chunk_anchor_min_score(args.anchor_min_score);
+        bp.set_chunk_use_anchor_filter(args.anchor_filter);
     }
     consensus.chunk_size = args.chunk_size;
     consensus.chunk_pct = args.chunk_pct;
@@ -3483,6 +3585,7 @@ fn cmd_consensus(args: &ConsensusArgs) {
             ConsensusStrategy::Majority => "majority",
             ConsensusStrategy::WeightedScore => "weighted_score",
             ConsensusStrategy::BestScore => "best_score",
+            ConsensusStrategy::BaseScore => "base_score",
         }
     );
     println!("  Threads: {}", args.threads);
@@ -3607,10 +3710,19 @@ fn cmd_fastcon(args: &FastConArgs) {
     let strategy = match args.strategy.as_str() {
         "majority" => bit_pop::fastcon::ConsensusStrategy::Majority,
         "best_score" => bit_pop::fastcon::ConsensusStrategy::BestScore,
+        "base_score" => bit_pop::fastcon::ConsensusStrategy::BaseScore,
         _ => bit_pop::fastcon::ConsensusStrategy::WeightedScore,
     };
 
-    let mut fastcon = FastCon::new(index_paths, bit_pop_exe, args.min_score).unwrap_or_else(|e| {
+    let mut fastcon = FastCon::new(
+        index_paths,
+        bit_pop_exe,
+        args.min_score,
+        args.context_window,
+        args.anchor_min_score,
+        args.anchor_filter,
+    )
+    .unwrap_or_else(|e| {
         eprintln!("Error: {}", e);
         std::process::exit(1);
     });
@@ -3633,6 +3745,7 @@ fn cmd_fastcon(args: &FastConArgs) {
             bit_pop::fastcon::ConsensusStrategy::Majority => "majority",
             bit_pop::fastcon::ConsensusStrategy::WeightedScore => "weighted_score",
             bit_pop::fastcon::ConsensusStrategy::BestScore => "best_score",
+            bit_pop::fastcon::ConsensusStrategy::BaseScore => "base_score",
         }
     );
     println!("  Threads per map: {}", args.threads);
@@ -3710,6 +3823,7 @@ fn cmd_chunk_consensus(args: &ChunkConsensusArgs) {
 
     let strategy = match args.strategy.as_str() {
         "majority" => ConsensusStrategy::Majority,
+        "base_score" => ConsensusStrategy::BaseScore,
         _ => ConsensusStrategy::WeightedScore,
     };
 
@@ -3720,6 +3834,7 @@ fn cmd_chunk_consensus(args: &ChunkConsensusArgs) {
         args.chunk_min,
         args.chunk_max,
         args.min_score,
+        args.anchor_min_score,
     )
     .unwrap_or_else(|e| {
         eprintln!("Error loading index: {}", e);

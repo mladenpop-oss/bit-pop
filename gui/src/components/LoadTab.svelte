@@ -18,6 +18,8 @@
   let useTopN = true;
   let topN = 4;
   let consensusTopN = 2;
+  let useChunkPct = false;
+  let chunkPct = 0.02;
   let status = '';
   let isRunning = false;
   let progress = 0;
@@ -78,6 +80,10 @@
     consensusTopN = parseInt(e.target.value);
   }
 
+  function handleChunkPctChange(e) {
+    chunkPct = parseFloat(e.target.value);
+  }
+
   async function runMapping() {
     if (!index1 || !readsPath) {
       status = 'Please select index 1 and reads';
@@ -121,6 +127,8 @@
           threads,
           useTopN,
           topN,
+          useChunkPct,
+          chunkPct,
         });
       } else {
         const indexes = [index1];
@@ -136,6 +144,8 @@
           useTopN,
           topN,
           consensusTopN,
+          useChunkPct,
+          chunkPct,
         });
       }
     } catch (e) {
@@ -259,6 +269,19 @@
       </div>
     </div>
   {/if}
+
+  <div class="field">
+    <label>
+      <input type="checkbox" bind:checked={useChunkPct} />
+      Chunk Pct: {(chunkPct * 100).toFixed(1)}%
+    </label>
+    {#if useChunkPct}
+      <div class="slider-row">
+        <input type="range" min="0.01" max="0.10" step="0.01" value={chunkPct} on:input={handleChunkPctChange} />
+        <input type="number" min="0.01" max="0.10" step="0.01" value={chunkPct} on:input={handleChunkPctChange} class="num" />
+      </div>
+    {/if}
+  </div>
 
   {#if progress > 0}
     <div class="progress-container">

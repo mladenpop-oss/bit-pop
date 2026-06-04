@@ -19,7 +19,7 @@ While existing aligners (Bowtie2, BWA, minimap2) map reads to a single reference
 | CAMI Low (k12-k15 consensus + EM) | 61 | ~1M | 91.1% | **90.07%** |
 | CAMI Low (k13+k22 + EM) | 61 | ~1M | **99.48%** | 89.86% |
 | PacBio HiFi (realistic simulation) | 69 | 86k | **99.0%** | **95.2%** |
-| **Ebola strains (Nanopore, 15% errors)** | **3** | **10k/strain** | **50.9%** | **97.9%** |
+| **Ebola strains (Nanopore, 15% errors)** | **3** | **10k/strain** | **81.0%** | **99.98%** |
 
 > **Species-level accuracy is ~100% across all benchmarks.** Misclassifications occur only within clades (sibling strains), never between species.
 
@@ -80,7 +80,7 @@ npm run tauri build
 ```
 
 **Build** — Create index from genome folder (k-mer size, threads, CAMI support)  
-**Load/Run** — Map reads (single index or multi-index consensus mode)  
+**Load/Run** — Map reads (single index or multi-index consensus mode, chunk-pct control)  
 **Results** — Load SAM file, view statistics, filter and sort results  
 **Help** — Step-by-step guide and GitHub link
 
@@ -97,7 +97,8 @@ npm run tauri build
 - **Paired-end support** — discordant pair reconciliation
 - **Taxonomic classification** — LCA algorithm (`bit-pop tax`)
 - **312+ unit tests**, 5 integration tests, 17 benchmark groups
-- **Outbreak-ready** — 97.9% strain accuracy on Nanopore reads (Ebola, 15% errors)
+- **Android JNI** — native Android app with identical algorithm to CLI (99.95% accuracy parity)
+- **Outbreak-ready** — 99.98% strain accuracy on Nanopore reads (Ebola, 15% errors)
 
 ## Bit-Pop vs Kraken2
 
