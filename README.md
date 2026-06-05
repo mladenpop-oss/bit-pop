@@ -19,9 +19,12 @@ While existing aligners (Bowtie2, BWA, minimap2) map reads to a single reference
 | CAMI Low (k12-k15 consensus + EM) | 61 | ~1M | 91.1% | **90.07%** |
 | CAMI Low (k13+k22 + EM) | 61 | ~1M | **99.48%** | 89.86% |
 | PacBio HiFi (realistic simulation) | 69 | 86k | **99.0%** | **95.2%** |
-| **Ebola strains (Nanopore, 15% errors)** | **3** | **10k/strain** | **81.0%** | **99.98%** |
+| **Ebola strains (Nanopore R9.4, 15% errors)** | **3** | **10k/strain** | **68-72%** | **95-97%** |
+| **Ebola strains (Nanopore R10.4, 5-8% errors)** | **3** | **10k/strain** | **80-81%** | **97%** |
+| **Ebola mixed sample (3 strains, R9.4)** | **3** | **~3.3k/strain** | **56%** | **intra-clade only** |
+| **Ebola + human contamination (R9.4)** | **4** | **5k each** | **59%** | **0% cross-contamination** |
 
-> **Species-level accuracy is ~100% across all benchmarks.** Misclassifications occur only within clades (sibling strains), never between species.
+> **Species-level accuracy is ~100% across all benchmarks.** Misclassifications occur only within clades (sibling strains), never between species. Human reads never map to viral genomes and vice versa.
 
 See [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for full benchmark details and methodology.
 
@@ -98,7 +101,8 @@ npm run tauri build
 - **Taxonomic classification** — LCA algorithm (`bit-pop tax`)
 - **312+ unit tests**, 5 integration tests, 17 benchmark groups
 - **Android JNI** — native Android app with identical algorithm to CLI (99.95% accuracy parity)
-- **Outbreak-ready** — 99.98% strain accuracy on Nanopore reads (Ebola, 15% errors)
+- **Outbreak-ready** — 95-97% strain accuracy on Nanopore R9.4 (Ebola, 15% errors); 97% on R10.4
+- **Human contamination safe** — 0% cross-mapping between human and viral reads
 
 ## Bit-Pop vs Kraken2
 

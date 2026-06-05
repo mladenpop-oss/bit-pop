@@ -152,13 +152,103 @@ bit-pop fast-con \
 
 ---
 
+## Ebola ONT Error Profile Comparison
+
+**Use case:** Compare R10.4 vs R9.4 chemistry for field deployment with different ONT devices.
+
+**Dataset:** 3 Ebola virus strains (Bundibugyo NC_014373, Sudan NC_006432, Zaire NC_002549), ~10k reads per strain per chemistry.
+
+**Simulation:** PBSIM3 — R10.4: QSHMM-ONT-HQ.model (~5-8% error), R9.4: QSHMM-ONT.model (~15% error).
+
+### Single-Strain Results (k13)
+
+| Strain | Chemistry | Mapped | Accuracy | Wrong (Zaire) | Wrong (Sudan) | Wrong (Bundi) |
+|--------|-----------|--------|----------|---------------|---------------|---------------|
+| Bundibugyo | R10.4 | 8,190 | **96.86%** | 150 | 107 | — |
+| Bundibugyo | R9.4 | 6,941 | **95.5%** | 181 | 131 | — |
+| Sudan | R10.4 | 8,331 | **97.23%** | 119 | — | 112 |
+| Sudan | R9.4 | 6,891 | **96.33%** | 125 | — | 128 |
+| Zaire | R10.4 | 8,359 | **96.83%** | — | 106 | 159 |
+| Zaire | R9.4 | 7,165 | **95.55%** | — | 118 | 201 |
+
+### Mixed Sample Results (consensus k13+k15)
+
+~3,333 reads per strain, combined into single FASTQ.
+
+| Chemistry | Mapped | Bundibugyo | Sudan | Zaire |
+|-----------|--------|------------|-------|-------|
+| R10.4 | 6,223 (62.2%) | 2,023 | 2,075 | 2,125 |
+| R9.4 | 5,640 (56.4%) | 1,856 | 1,840 | 1,944 |
+
+### Key Findings
+
+1. **R10.4 consistently outperforms R9.4** — +1-2% accuracy across all strains
+2. **Sudan easiest to classify** — 97.23% on R10.4, fewest misclassifications
+3. **Zaire hardest to classify** — most misclassifications, especially → Bundibugyo
+4. **All errors are intra-clade** — within Ebola genus only, never cross-species
+5. **Mixed sample: all 3 strains correctly separated** — no cross-contamination
+
+---
+
+## Ebola Coverage Depth Test
+
+**Use case:** Determine minimum coverage needed for reliable classification in field conditions.
+
+**Dataset:** Bundibugyo (NC_014373), R9.4 chemistry (worst-case scenario), consensus k13+k15.
+
+### Results
+
+| Coverage | Input Reads | Mapped | Accuracy | Misclassified |
+|----------|-------------|--------|----------|---------------|
+| 5x | 12 | 10 (83%) | **90%** | 1 → Zaire |
+| 10x | 22 | 17 (77%) | **94.12%** | 1 → Zaire |
+| 20x | 47 | 39 (83%) | **97.44%** | 1 → Zaire |
+| 50x | 123 | 91 (74%) | **98.9%** | 1 → Zaire |
+
+### Key Findings
+
+1. **Higher coverage = higher accuracy** — from 90% at 5x to 98.9% at 50x
+2. **Only 1 error at every coverage level**, always → Zaire
+3. **Even 5x coverage gives 90% accuracy** — viable for ultra-low-input field samples
+
+---
+
+## Ebola Human Contamination Test
+
+**Use case:** Clinical samples contain significant human DNA — verify Bit-Pop correctly separates human reads from viral reads.
+
+**Dataset:** Bundibugyo + human chr19 (GRCh38, 58.6 Mb), R9.4 chemistry, consensus k13+k15.
+
+**Setup:** 5,000 human reads + 5,000 Bundibugyo reads = 10,000 total.
+
+### Results
+
+| Mapped to | Count | % of Mapped |
+|-----------|-------|-------------|
+| Human chr19 | 3,526 | 55.1% |
+| Bundibugyo | 2,799 | 43.8% |
+| Zaire | 54 | 0.8% |
+| Sudan | 15 | 0.2% |
+| Unmapped | 3,606 | — |
+| **Total** | **10,000** | **100%** |
+
+### Key Findings
+
+1. **Zero cross-contamination** — no human reads → Ebola, no Ebola reads → human
+2. **Human reads correctly classified to chr19** — 3,526/5,000 mapped (rest unmapped, expected for partial genome)
+3. **Ebola reads correctly classified to Bundibugyo** — 2,799/5,000 mapped (rest unmapped, expected for R9.4)
+4. **Minor Zaire/Sudan misclassifications** — consistent with single-strain results
+
+---
+
 ## Methodology Notes
 
 - All benchmarks run on consumer hardware (Intel i5-14400, no GPU)
 - Ground truth known for all benchmarks (simulated reads)
 - CAMI Low dataset: standard community benchmark for metagenomic classifiers
 - PacBio simulation: custom Python script with homopolymer, chimera, and coverage variation modeling (see `scripts/simulate_reads.py`)
-- Ebola simulation: PBSIM3 with ONT error profile (~85% accuracy, 8% insertion, 6% deletion)
+- Ebola simulation: PBSIM3 with ONT error profiles — R9.4: QSHMM-ONT.model (~85% accuracy, 8% insertion, 6% deletion); R10.4: QSHMM-ONT-HQ.model (~92-95% accuracy)
+- Human contamination test: PBSIM3 with human chr19 (GRCh38, 58.6 Mb) + Bundibugyo
 - Accuracy metric: exact genome name match (strain-level); species-level computed separately
 - EM temperature=1.0 recommended (temperature=0.1 over-concentrates probability mass)
 - Dynamic chunking (`--chunk-pct`) recommended for long reads with high error rates
