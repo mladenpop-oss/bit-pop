@@ -23,6 +23,8 @@ While existing aligners (Bowtie2, BWA, minimap2) map reads to a single reference
 | **Ebola strains (Nanopore R10.4, 5-8% errors)** | **3** | **10k/strain** | **80-81%** | **97%** |
 | **Ebola mixed sample (3 strains, R9.4)** | **3** | **~3.3k/strain** | **56%** | **intra-clade only** |
 | **Ebola + human contamination (R9.4)** | **4** | **5k each** | **59%** | **0% cross-contamination** |
+| **Ebola outbreak detection (unknown variant)** | **2** | **27.5k** | **24%** | **76% unmapped → alert** |
+| **Ebola 2026 DRC (3 refs, chunk-pct 3%)** | **3** | **27.5k** | **93.5%** | **Bundibugyo identified** |
 
 > **Species-level accuracy is ~100% across all benchmarks.** Misclassifications occur only within clades (sibling strains), never between species. Human reads never map to viral genomes and vice versa.
 
@@ -87,6 +89,26 @@ npm run tauri build
 **Results** — Load SAM file, view statistics, filter and sort results  
 **Help** — Step-by-step guide and GitHub link
 
+## Outbreak Detection Mode
+
+Bit-Pop works as both a classifier **and** an outbreak detector. The mapping rate itself is a diagnostic signal:
+
+| Mapping Rate | Interpretation | Action |
+|---|---|---|
+| **>70%** | Known strain in index | Classify normally |
+| **30-70%** | Related but divergent | Review top genomes, consider adding references |
+| **<30%** | Unknown/novel variant | **ALERT** — possible new outbreak, escalate for sequencing |
+
+**How it works:** When reads don't match any genome in the index, they appear as unmapped. A high unmapped rate signals the presence of a novel variant not in the reference database.
+
+**Real-world example — Ebola 2026 DRC Outbreak:**
+- **Index:** 2 reference strains (Zaire, Sudan) — no Bundibugyo
+- **Reads:** 27,541 ONT reads from 6 new Bundibugyo outbreak strains
+- **Result:** 24% mapped, **76% unmapped** → Unknown variant alert
+- **Follow-up:** Adding old Bundibugyo reference → 86% mapped as Bundibugyo (93.5% with chunk-pct 3%)
+
+**Best practice:** Use single index for clearest unmapped signal. Consensus mode may produce more false mappings.
+
 ## Key Features
 
 - **FM-index + 2-bit XOR alignment** — ~2.3 ns per 31-base chunk
@@ -112,7 +134,7 @@ npm run tauri build
 | Build time | **17 seconds** | Hours to days |
 | Custom genomes | **Trivial** | Requires full taxonomy dump |
 | Offline use | ✅ | ✅ |
-| "Unknown unknown" | ⚠️ Requires server infrastructure | ✅ Full NCBI |
+| "Unknown unknown" detection | ✅ High unmapped rate = novel variant | ✅ Full NCBI coverage |
 
 **Use Bit-Pop when** you know which organisms to look for. **Use Kraken2 when** you need broad discovery against all of NCBI.
 

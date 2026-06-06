@@ -306,4 +306,42 @@ bit-pop fast-con \
 
 ---
 
+## Outbreak Detection — Unknown Variants
+
+**Use case:** Detect novel outbreak strains not present in the reference index.
+
+**Dataset:** 6 novel Bundibugyo outbreak strains (PP_*), 27,541 simulated ONT reads (PBSIM3, ~8% error).
+
+### Test: Unknown Variant (Index: Zaire + Sudan only, NO Bundibugyo)
+
+Simulates real outbreak scenario where new strain is not in reference database.
+
+| Mode | Total Reads | Mapped | Unmapped | Top Genome | Signal |
+|---|---|---|---|---|---|
+| Single index (k13) | 5,532 | 1,349 (24%) | 4,183 (76%) | Zaire 20.4% | **Unknown variant alert** |
+| Consensus (k13+k15) | 5,532 | 2,057 (37%) | 3,475 (63%) | Zaire 27.4% | **Unknown variant alert** |
+
+**Key finding:** Single index gives stronger unmapped signal (76% vs 63%), better for outbreak detection.
+
+### Test: Known Clade (Index: Zaire + Sudan + Bundibugyo reference)
+
+Old Bundibugyo reference (NC_014373) in index, new outbreak strains not in index.
+
+| Chunk-pct | Mapped | Bundibugyo | Zaire | Sudan |
+|---|---|---|---|---|
+| 0.02 (~400bp) | 6,366 | 86% | 9.3% | 4.7% |
+| 0.03 (~600bp) | 5,524 | **93.5%** | 4.3% | 2.2% |
+
+**Key finding:** Larger chunks (3%) improve accuracy for ONT data. Old Bundibugyo reference correctly identifies new outbreak strains.
+
+### Interpretation Guidelines
+
+| Unmapped Rate | Meaning | Action |
+|---|---|---|
+| **>70%** | Novel variant or species not in index | **ALERT** — escalate for sequencing |
+| **50-70%** | Divergent strain, consider adding references | Review top genomes |
+| **<30%** | Normal — reads match known genomes | Classify normally |
+
+---
+
 ## Methodology Notes

@@ -415,15 +415,24 @@ impl FastCon {
         }
 
         for read_name in &all_read_names {
+            let seq = read_seqs
+                .get(read_name)
+                .cloned()
+                .unwrap_or_else(|| "*".to_string());
+
             let k_results = match read_results.get(read_name) {
                 Some(r) => r,
                 None => {
+                    // Read not found in any index - write as unmapped
+                    self.write_unmapped_line(&mut writer, read_name, &seq)?;
                     pb.inc(1);
                     continue;
                 }
             };
 
             if k_results.len() < self.min_k_mappings {
+                // Not enough mappings across indexes - write as unmapped
+                self.write_unmapped_line(&mut writer, read_name, &seq)?;
                 pb.inc(1);
                 continue;
             }
@@ -439,6 +448,8 @@ impl FastCon {
             };
 
             if filtered.is_empty() {
+                // All mappings below min score - write as unmapped
+                self.write_unmapped_line(&mut writer, read_name, &seq)?;
                 pb.inc(1);
                 continue;
             }
@@ -451,10 +462,6 @@ impl FastCon {
             };
 
             let limit = if self.top_n > 1 { self.top_n } else { 1 };
-            let seq = read_seqs
-                .get(read_name)
-                .cloned()
-                .unwrap_or_else(|| "*".to_string());
 
             for (i, cr) in candidates.iter().take(limit).enumerate() {
                 self.write_sam_line(&mut writer, read_name, &seq, cr, i == 0)?;
@@ -656,6 +663,22 @@ impl FastCon {
             xs_tag,
         )
         .map_err(|e| format!("Failed to write SAM line: {}", e))?;
+        Ok(())
+    }
+
+    fn write_unmapped_line(
+        &self,
+        writer: &mut BufWriter<File>,
+        read_name: &str,
+        read_seq: &str,
+    ) -> Result<(), String> {
+        // Write unmapped SAM line: flag=4, genome="*", pos=0, mapq=0, cigar="*"
+        writeln!(
+            writer,
+            "{}\t4\t*\t0\t0\t*\t*\t0\t0\t{}\t*\tAS:f:0.0000",
+            read_name, read_seq,
+        )
+        .map_err(|e| format!("Failed to write unmapped SAM line: {}", e))?;
         Ok(())
     }
 
