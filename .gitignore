@@ -81,3 +81,23 @@ pac.md
 pacbio_results.md
 chunk.md
 test.md
+plan_gui.md
+bit-pop-project-brief.md
+procitaj.txt
+README-old.md
+
+# Scripts - local only
+check_accuracy.py
+download_70.py
+download_genomes.py
+simulate_51.py
+simulate_realistic.py
+paper.txt
+paper_new_fixed.docx
+paper_new_v2.md
+
+# Rust test files
+generate_test_reads.rs
+
+# Index files
+codelens.idx
