@@ -763,6 +763,9 @@ pub struct BitPop {
     /// Minimum anchor score threshold for chunk-based mapping (default: 0.5)
     chunk_anchor_min_score: f64,
 
+    /// Minimum score filter for chunk results (0.0 = disabled, preserves default behavior)
+    chunk_min_score: f64,
+
     /// Use legacy anchor_filter for chunks (instead of full map_read pipeline)
     chunk_use_anchor_filter: bool,
 
@@ -826,6 +829,7 @@ impl BitPop {
             chunk_anchor_strategy: ChunkAnchorStrategy::Rarest,
             chunk_score_mode: ChunkScoreMode::Quality,
             chunk_anchor_min_score: 0.5,
+            chunk_min_score: 0.0,
             chunk_use_anchor_filter: false,
             enable_hf: false,
             hf_min_run: 3,
@@ -1022,6 +1026,16 @@ impl BitPop {
     /// Get the current chunk anchor min score threshold.
     pub fn chunk_anchor_min_score(&self) -> f64 {
         self.chunk_anchor_min_score
+    }
+
+    /// Set the minimum score filter for chunk results (0.0 = disabled).
+    pub fn set_chunk_min_score(&mut self, min_score: f64) {
+        self.chunk_min_score = min_score;
+    }
+
+    /// Get the current chunk min score filter.
+    pub fn chunk_min_score(&self) -> f64 {
+        self.chunk_min_score
     }
 
     /// Set whether to use legacy anchor_filter for chunks (instead of full map_read).
@@ -3336,11 +3350,22 @@ impl BitPop {
         context_window: usize,
         _is_rc: bool,
     ) -> Vec<MappingResult> {
-        let scored = self.anchor_filter_with_mode(read, mode, 0.7, DEFAULT_REPEAT_THRESHOLD);
+        let anchor_threshold = if self.chunk_min_score > 0.0 {
+            self.chunk_min_score
+        } else {
+            0.7
+        };
+        let ranking_threshold = if self.chunk_min_score > 0.0 {
+            self.chunk_min_score
+        } else {
+            0.5
+        };
+        let scored =
+            self.anchor_filter_with_mode(read, mode, anchor_threshold, DEFAULT_REPEAT_THRESHOLD);
         if scored.is_empty() {
             return Vec::new();
         }
-        self.rank_scored_results(&scored, read, context_window, 0.5)
+        self.rank_scored_results(&scored, read, context_window, ranking_threshold)
     }
 
     /// Map a read with custom threshold (for two-pass mapping).
@@ -3853,6 +3878,7 @@ impl BitPop {
             chunk_anchor_strategy: ChunkAnchorStrategy::Rarest,
             chunk_score_mode: ChunkScoreMode::Quality,
             chunk_anchor_min_score: 0.5,
+            chunk_min_score: 0.0,
             chunk_use_anchor_filter: false,
             enable_hf: false,
             hf_min_run: 3,
@@ -4898,10 +4924,15 @@ impl BitPop {
             } else {
                 // Default: full map_read pipeline (like JNI Android)
                 let mapped = self.map_read(chunk_seq, context_window);
-                mapped
+                let mut chunk_results: Vec<_> = mapped
                     .into_iter()
                     .map(|r| (r.genome_id, r.position, r.score, r.cigar))
-                    .collect::<Vec<_>>()
+                    .collect();
+                // Apply min_score filter if enabled (chunk_min_score > 0.0)
+                if self.chunk_min_score > 0.0 {
+                    chunk_results.retain(|r| r.2 >= self.chunk_min_score);
+                }
+                chunk_results
             };
             if chunk_results.is_empty() {
                 continue;

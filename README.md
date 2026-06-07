@@ -25,6 +25,7 @@ While existing aligners (Bowtie2, BWA, minimap2) map reads to a single reference
 | **Ebola + human contamination (R9.4)** | **4** | **5k each** | **59%** | **0% cross-contamination** |
 | **Ebola outbreak detection (unknown variant)** | **2** | **27.5k** | **24%** | **76% unmapped → alert** |
 | **Ebola 2026 DRC (3 refs, chunk-pct 3%)** | **3** | **27.5k** | **93.5%** | **Bundibugyo identified** |
+| **Clinical sample (70/15/10/5%, k21+EM)** | **20+** | **11.7k** | **85.5%** | **99.3% overall, 99.5% Ebola** |
 
 > **Species-level accuracy is ~100% across all benchmarks.** Misclassifications occur only within clades (sibling strains), never between species. Human reads never map to viral genomes and vice versa.
 
@@ -124,6 +125,7 @@ Bit-Pop works as both a classifier **and** an outbreak detector. The mapping rat
 - **312+ unit tests**, 5 integration tests, 17 benchmark groups
 - **Android JNI** — native Android app with identical algorithm to CLI (99.95% accuracy parity)
 - **Outbreak-ready** — 95-97% strain accuracy on Nanopore R9.4 (Ebola, 15% errors); 97% on R10.4
+- **Clinical sample classification** — 99.3% overall accuracy (human/bacteria/Ebola mix), k21+EM optimal
 - **Human contamination safe** — 0% cross-mapping between human and viral reads
 
 ## Bit-Pop vs Kraken2

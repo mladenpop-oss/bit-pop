@@ -1566,6 +1566,11 @@ fn cmd_map(args: &MapArgs, verbose: bool) {
         println!("  Anchor min score: {}", args.anchor_min_score);
     }
 
+    bp.set_chunk_min_score(args.min_score);
+    if args.min_score > 0.0 {
+        println!("  Chunk min score: {}", args.min_score);
+    }
+
     if args.anchor_filter {
         bp.set_chunk_use_anchor_filter(true);
         println!("  Anchor filter: enabled (legacy mode)");
@@ -2971,6 +2976,11 @@ async fn cmd_run(args: &RunArgs) -> Result<(), String> {
         println!("  Anchor min score: {}", args.anchor_min_score);
     }
 
+    bp.set_chunk_min_score(args.min_score);
+    if args.min_score > 0.0 {
+        println!("  Chunk min score: {}", args.min_score);
+    }
+
     if args.anchor_filter {
         bp.set_chunk_use_anchor_filter(true);
         println!("  Anchor filter: enabled (legacy mode)");
@@ -3563,6 +3573,7 @@ fn cmd_consensus(args: &ConsensusArgs) {
     for bp in consensus.indexes.values_mut() {
         bp.set_top_n(args.top_n);
         bp.set_chunk_anchor_min_score(args.anchor_min_score);
+        bp.set_chunk_min_score(args.min_score);
         bp.set_chunk_use_anchor_filter(args.anchor_filter);
     }
     consensus.chunk_size = args.chunk_size;

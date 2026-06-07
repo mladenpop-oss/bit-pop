@@ -66,6 +66,7 @@ fn load_instance(
     chunk_min: usize,
     chunk_max: usize,
     anchor_min_score: f64,
+    min_score: f64,
 ) -> Result<BitPop, String> {
     let mut bp = BitPop::deserialize_from_file(path)
         .map_err(|e| format!("Failed to load index {}: {}", path, e))?;
@@ -73,6 +74,7 @@ fn load_instance(
     bp.set_chunk_min(chunk_min);
     bp.set_chunk_max(chunk_max);
     bp.set_chunk_anchor_min_score(anchor_min_score);
+    bp.set_chunk_min_score(min_score);
     Ok(bp)
 }
 
@@ -95,7 +97,14 @@ impl MultiChunkConsensus {
                 pct * 100.0,
                 index_path
             );
-            let bp = load_instance(index_path, pct, chunk_min, chunk_max, anchor_min_score)?;
+            let bp = load_instance(
+                index_path,
+                pct,
+                chunk_min,
+                chunk_max,
+                anchor_min_score,
+                min_score,
+            )?;
             bp_instances.push(bp);
         }
 
