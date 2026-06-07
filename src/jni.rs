@@ -134,7 +134,7 @@ pub extern "system" fn Java_com_bitpop_MainActivity_fastConMap(
         // Phase 1: Map each index, save SAM
         let mut sam_results: Vec<Vec<(String, String, f64)>> = Vec::new();
 
-        for (i, p) in paths.iter().enumerate() {
+        for p in paths.iter() {
             let bp = BitPop::deserialize_from_file(p)?;
             let mut results: Vec<(String, String, f64)> = Vec::new();
 
