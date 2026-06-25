@@ -136,7 +136,7 @@
         if (include3 && index3) indexes.push(index3);
         if (include4 && index4) indexes.push(index4);
 
-        await invoke('run_fastcon', {
+        await invoke('run_concon', {
           indexes,
           reads: readsPath,
           output: outputPath,

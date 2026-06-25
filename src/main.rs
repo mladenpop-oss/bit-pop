@@ -9,8 +9,8 @@ use std::time::Instant;
 
 use bit_pop::cache::CacheManager;
 use bit_pop::chunk_consensus::MultiChunkConsensus;
+use bit_pop::concon::ConCon;
 use bit_pop::consensus::MultiKConsensus;
-use bit_pop::fastcon::FastCon;
 use bit_pop::fastq::{parse_reads, ReadsFormat};
 use bit_pop::ncbi::{NcbiClient, NcbiConfig};
 use bit_pop::{AlignMode, BitPop, FuzzyMethod};
@@ -72,8 +72,8 @@ enum Commands {
     /// Multi-k consensus: map reads against multiple k-indexes with voting
     Consensus(ConsensusArgs),
 
-    /// Fast consensus: run `bit-pop map` for each index, then combine (like Python script)
-    FastCon(FastConArgs),
+    /// Consensus: run `bit-pop map` for each index, then combine
+    ConCon(ConConArgs),
 
     /// Multi chunk-% consensus: same index, different chunk sizes, voting
     ChunkConsensus(ChunkConsensusArgs),
@@ -726,7 +726,7 @@ struct ConsensusArgs {
 }
 
 #[derive(clap::Args)]
-struct FastConArgs {
+struct ConConArgs {
     /// List of index files, e.g. "index_k10.bitpop index_k20.bitpop"
     #[arg(short, long, required = true, num_args = 1..)]
     indexes: Vec<String>,
@@ -926,8 +926,8 @@ async fn main() {
             cmd_consensus(&args);
             Ok(())
         }
-        Commands::FastCon(args) => {
-            cmd_fastcon(&args);
+        Commands::ConCon(args) => {
+            cmd_concon(&args);
             Ok(())
         }
         Commands::ChunkConsensus(args) => {
@@ -3666,11 +3666,11 @@ fn cmd_consensus(args: &ConsensusArgs) {
     }
 }
 
-fn cmd_fastcon(args: &FastConArgs) {
+fn cmd_concon(args: &ConConArgs) {
     use std::time::Instant;
 
     let start = Instant::now();
-    println!("Bit-Pop fast consensus (subprocess)");
+    println!("Bit-Pop consensus (subprocess)");
     println!("=====================================");
     println!();
 
@@ -3719,13 +3719,13 @@ fn cmd_fastcon(args: &FastConArgs) {
 
     // Parse strategy
     let strategy = match args.strategy.as_str() {
-        "majority" => bit_pop::fastcon::ConsensusStrategy::Majority,
-        "best_score" => bit_pop::fastcon::ConsensusStrategy::BestScore,
-        "base_score" => bit_pop::fastcon::ConsensusStrategy::BaseScore,
-        _ => bit_pop::fastcon::ConsensusStrategy::WeightedScore,
+        "majority" => bit_pop::concon::ConsensusStrategy::Majority,
+        "best_score" => bit_pop::concon::ConsensusStrategy::BestScore,
+        "base_score" => bit_pop::concon::ConsensusStrategy::BaseScore,
+        _ => bit_pop::concon::ConsensusStrategy::WeightedScore,
     };
 
-    let mut fastcon = FastCon::new(
+    let mut concon = ConCon::new(
         index_paths,
         bit_pop_exe,
         args.min_score,
@@ -3738,14 +3738,14 @@ fn cmd_fastcon(args: &FastConArgs) {
         std::process::exit(1);
     });
 
-    fastcon.strategy = strategy;
-    fastcon.min_k_mappings = args.min_k_mappings;
-    fastcon.map_top_n = args.top_n;
-    fastcon.top_n = args.consensus_top_n;
-    fastcon.chunk_size = args.chunk_size;
-    fastcon.chunk_pct = args.chunk_pct;
-    fastcon.chunk_min = args.chunk_min;
-    fastcon.chunk_max = args.chunk_max;
+    concon.strategy = strategy;
+    concon.min_k_mappings = args.min_k_mappings;
+    concon.map_top_n = args.top_n;
+    concon.top_n = args.consensus_top_n;
+    concon.chunk_size = args.chunk_size;
+    concon.chunk_pct = args.chunk_pct;
+    concon.chunk_min = args.chunk_min;
+    concon.chunk_max = args.chunk_max;
 
     println!("[1/3] Configuration");
     println!("  Reads: {}", args.reads.display());
@@ -3753,10 +3753,10 @@ fn cmd_fastcon(args: &FastConArgs) {
     println!(
         "  Strategy: {}",
         match strategy {
-            bit_pop::fastcon::ConsensusStrategy::Majority => "majority",
-            bit_pop::fastcon::ConsensusStrategy::WeightedScore => "weighted_score",
-            bit_pop::fastcon::ConsensusStrategy::BestScore => "best_score",
-            bit_pop::fastcon::ConsensusStrategy::BaseScore => "base_score",
+            bit_pop::concon::ConsensusStrategy::Majority => "majority",
+            bit_pop::concon::ConsensusStrategy::WeightedScore => "weighted_score",
+            bit_pop::concon::ConsensusStrategy::BestScore => "best_score",
+            bit_pop::concon::ConsensusStrategy::BaseScore => "base_score",
         }
     );
     println!("  Threads per map: {}", args.threads);
@@ -3773,7 +3773,7 @@ fn cmd_fastcon(args: &FastConArgs) {
     println!();
 
     println!("[2/3] Running consensus...");
-    match fastcon.run(&args.reads, &args.output, args.threads) {
+    match concon.run(&args.reads, &args.output, args.threads) {
         Ok((mapped, total)) => {
             println!();
             println!("=====================================");

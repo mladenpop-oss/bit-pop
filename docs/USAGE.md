@@ -221,12 +221,12 @@ bit-pop consensus -i index_k13.bitpop index_k15.bitpop \
 
 ---
 
-### `fast-con` — Fast Consensus
+### `concon` — Consensus
 
 Runs `bit-pop map` for each index, then combines results (subprocess-based, like Python script).
 
 ```bash
-bit-pop fast-con -i <INDEXES>... -r <READS> -o <OUTPUT> [OPTIONS]
+bit-pop concon -i <INDEXES>... -r <READS> -o <OUTPUT> [OPTIONS]
 ```
 
 **Options:**
@@ -247,12 +247,12 @@ bit-pop fast-con -i <INDEXES>... -r <READS> -o <OUTPUT> [OPTIONS]
 **Examples:**
 ```bash
 # Fast consensus with two indexes
-bit-pop fast-con -i index_k17.bitpop index_k15.bitpop \
+bit-pop concon -i index_k17.bitpop index_k15.bitpop \
   -r reads.fastq -o output.sam --strategy weighted_score \
   --top-n 4 -t 16 --consensus-top-n 2
 
 # With chunking
-bit-pop fast-con -i index_k17.bitpop index_k15.bitpop \
+bit-pop concon -i index_k17.bitpop index_k15.bitpop \
   -r reads.fastq -o output.sam --chunk-pct 0.03 \
   --chunk-min 125 --chunk-max 200 -t 16
 ```
@@ -385,7 +385,7 @@ bit-pop em -i output.sam -o final.sam --top-k 10 --temperature 0.1
 ### Ebola Strain Identification
 
 ```bash
-bit-pop fast-con -i ebola_k13.bitpop ebola_k15.bitpop \
+bit-pop concon -i ebola_k13.bitpop ebola_k15.bitpop \
   -r reads.fastq -o output.sam \
   --strategy weighted_score --top-n 4 \
   --chunk-pct 0.02 --consensus-top-n 2 -t 16

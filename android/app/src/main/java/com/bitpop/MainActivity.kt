@@ -64,9 +64,9 @@ class MainActivity : AppCompatActivity() {
 
         modeSpinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
             override fun onItemSelected(p0: android.widget.AdapterView<*>?, p1: View?, position: Int, p3: Long) {
-                mode = if (position == 0) "base" else "fastcon"
-                multiIndexLayout.visibility = if (mode == "fastcon") LinearLayout.VISIBLE else LinearLayout.GONE
-                chunkingLayout.visibility = if (mode == "fastcon") LinearLayout.VISIBLE else LinearLayout.GONE
+                mode = if (position == 0) "base" else "concon"
+                multiIndexLayout.visibility = if (mode == "concon") LinearLayout.VISIBLE else LinearLayout.GONE
+                chunkingLayout.visibility = if (mode == "concon") LinearLayout.VISIBLE else LinearLayout.GONE
             }
             override fun onNothingSelected(p0: android.widget.AdapterView<*>?) {}
         }

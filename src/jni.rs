@@ -217,7 +217,7 @@ pub extern "system" fn Java_com_bitpop_MainActivity_fastConMap(
         }
 
         writer.flush()?;
-        Ok(format!("FastCon: {} / {} reads mapped", mapped, total))
+        Ok(format!("ConCon: {} / {} reads mapped", mapped, total))
     })();
 
     let msg = match result {

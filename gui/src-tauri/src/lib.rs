@@ -237,7 +237,7 @@ async fn run_map(
 }
 
 #[tauri::command]
-async fn run_fastcon(
+async fn run_concon(
     app_handle: tauri::AppHandle,
     indexes: Vec<String>,
     reads: String,
@@ -258,7 +258,7 @@ async fn run_fastcon(
 
     app_handle.emit("run-started", "Running consensus...").unwrap();
 
-    let mut args = vec!["fast-con".to_string()];
+    let mut args = vec!["concon".to_string()];
 
     for idx in &indexes {
         args.push("-i".to_string());
@@ -577,7 +577,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             build_index,
             run_map,
-            run_fastcon,
+            run_concon,
             parse_sam_stats,
             parse_sam_rows,
         ])

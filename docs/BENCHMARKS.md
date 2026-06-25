@@ -118,7 +118,7 @@ Longer reads improve strain disambiguation because P(read spans SNP) scales with
 ### Best Configuration
 
 ```bash
-bit-pop fast-con \
+bit-pop concon \
   -i ebola_k13.bitpop ebola_k15.bitpop \
   -r reads.fastq -o output.sam \
   --strategy weighted_score --top-n 4 \
@@ -269,7 +269,7 @@ bit-pop fast-con \
 ### Configuration
 
 ```bash
-bit-pop fast-con \
+bit-pop concon \
   -i ebola_k13.bitpop ebola_k15.bitpop \
   -r sudan_10k.fq -o output.sam \
   --strategy weighted_score --top-n 4 \

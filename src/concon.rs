@@ -41,7 +41,7 @@ pub enum ConsensusStrategy {
 }
 
 /// Fast consensus: runs `bit-pop map` subprocess for each index, then combines.
-pub struct FastCon {
+pub struct ConCon {
     /// Index paths (k-value read from each index file)
     pub indexes: Vec<PathBuf>,
     /// k-values loaded from index files (same order as indexes)
@@ -62,7 +62,7 @@ pub struct FastCon {
     pub anchor_filter: bool,
 }
 
-impl FastCon {
+impl ConCon {
     pub fn new(
         indexes: Vec<PathBuf>,
         bit_pop_exe: PathBuf,
@@ -106,7 +106,7 @@ impl FastCon {
         })
     }
 
-    /// Derive temp SAM path from index path: index.bitpop -> index.fastcon.sam
+    /// Derive temp SAM path from index path: index.bitpop -> index.concon.sam
     fn temp_sam_path(index_path: &Path) -> PathBuf {
         let mut stem = index_path
             .file_stem()
@@ -116,7 +116,7 @@ impl FastCon {
         if let Some(ext) = index_path.extension() {
             stem.push_str(&format!(".{}", ext.to_string_lossy()));
         }
-        stem.push_str(".fastcon.sam");
+        stem.push_str(".concon.sam");
         index_path
             .parent()
             .unwrap_or(std::path::Path::new("."))

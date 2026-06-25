@@ -94,11 +94,11 @@ pub mod bam;
 pub mod cache;
 pub mod chain;
 pub mod chunk_consensus;
+pub mod concon;
 pub mod consensus;
 pub mod delta;
 pub mod em;
 pub mod fasta;
-pub mod fastcon;
 pub mod fastq;
 pub mod fm;
 pub mod hf;
@@ -114,8 +114,8 @@ pub mod snp;
 pub mod taxonomy;
 
 pub use chunk_consensus::MultiChunkConsensus;
+pub use concon::ConCon;
 pub use consensus::{ConsensusResult, ConsensusStrategy, KResult, MultiKConsensus};
-pub use fastcon::FastCon;
 
 use std::fmt;
 
